@@ -522,31 +522,15 @@ class SenseNovaU1Attention(nn.Module):
 
     def forward_gen_varlen(
         self,
-        hidden_states,
-        indexes,
-        prefix_kv_list,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-    ):
-        """Varlen generation path for batched requests with different prefix lengths.
-
-        Args:
-            hidden_states: [1, total_tokens, D] — packed image embeddings.
-            indexes: [3, total_tokens] — packed 3D RoPE indices (t, h, w).
-            prefix_kv_list: Per-request prefix K/V for this layer.
-                Each element is (prefix_k, prefix_v) with shape
-                [prefix_len_i, num_kv_heads, head_dim].
-            cu_seqlens_q: [N+1] int32 — cumulative query sequence lengths.
-            cu_seqlens_k: [N+1] int32 — cumulative key sequence lengths
-                (prefix + query per request).
-            max_seqlen_q: Maximum query sequence length across requests.
-            max_seqlen_k: Maximum key sequence length across requests.
-
-        Returns:
-            [1, total_tokens, D]
-        """
+        hidden_states: torch.Tensor,
+        indexes: torch.Tensor,
+        prefix_kv_list: list[tuple[torch.Tensor, torch.Tensor]],
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        """Varlen generation path for batched requests with different prefix lengths."""
         from flash_attn import flash_attn_varlen_func
 
         input_shape = hidden_states.shape[:-1]
@@ -820,30 +804,15 @@ class SenseNovaU1Model(nn.Module):
 
     def forward_varlen(
         self,
-        inputs_embeds,
-        indexes,
-        past_key_values_list,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-    ):
-        """Varlen generation forward for batched requests.
-
-        Args:
-            inputs_embeds: [1, total_tokens, D] — packed image embeddings.
-            indexes: [3, total_tokens] — packed 3D RoPE indices.
-            past_key_values_list: List of DynamicCache, one per request.
-                Each cache has per-layer flash_k_cache/flash_v_cache from
-                prepare_flash_kv_cache.
-            cu_seqlens_q: [N+1] int32.
-            cu_seqlens_k: [N+1] int32.
-            max_seqlen_q: int.
-            max_seqlen_k: int.
-
-        Returns:
-            SenseNovaU1ModelOutput with last_hidden_state [1, total_tokens, D].
-        """
+        inputs_embeds: torch.Tensor,
+        indexes: torch.Tensor,
+        past_key_values_list: list[DynamicCache],
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> SenseNovaU1ModelOutput:
+        """Varlen generation forward for batched requests."""
         hidden_states = inputs_embeds
         for layer_idx, layer in enumerate(self.layers):
             prefix_kv_list = []
