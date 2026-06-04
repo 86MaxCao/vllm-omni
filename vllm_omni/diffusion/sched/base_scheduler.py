@@ -51,7 +51,9 @@ def get_request_batch_sampling_params_key(request: OmniDiffusionRequest) -> Requ
 
 
 def _keys_match_ignoring(
-    a: SamplingParamsKey, b: SamplingParamsKey, ignore_fields: list[str],
+    a: SamplingParamsKey,
+    b: SamplingParamsKey,
+    ignore_fields: list[str],
 ) -> bool:
     """Compare two SamplingParamsKey instances, ignoring specified fields."""
     for f in fields(a):
