@@ -9,9 +9,8 @@ Usage:
     python -m pytest tests/diffusion/models/sensenova_u1/test_sensenova_u1_step_execution_unit.py -v
 """
 
-import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -103,7 +102,6 @@ def test_class_has_step_states_dict():
 
 def test_protocol_isinstance_check():
     """Pipeline class satisfies SupportsStepExecution protocol structurally."""
-    from vllm_omni.diffusion.models.interface import SupportsStepExecution
     from vllm_omni.diffusion.models.sensenova_u1.pipeline_sensenova_u1 import SenseNovaU1Pipeline
 
     assert SenseNovaU1Pipeline.supports_step_execution is True

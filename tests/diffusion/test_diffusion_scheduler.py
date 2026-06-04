@@ -1121,7 +1121,7 @@ class TestKeysMatchIgnoring:
     """Tests for _keys_match_ignoring module-level function."""
 
     @staticmethod
-    def _make_key(**overrides) -> "SamplingParamsKey":
+    def _make_key(**overrides):
         from vllm_omni.diffusion.sched.interface import SamplingParamsKey
 
         defaults = dict(height=512, width=512, do_classifier_free_guidance=False)

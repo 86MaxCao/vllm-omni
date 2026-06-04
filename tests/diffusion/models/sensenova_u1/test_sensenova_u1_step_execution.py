@@ -56,12 +56,12 @@ def _init_distributed():
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", world_size=1, rank=0)
 
+    import vllm.distributed.parallel_state as vllm_ps
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed.parallel_state import (
         init_world_group,
         initialize_model_parallel,
     )
-    import vllm.distributed.parallel_state as vllm_ps
 
     if vllm_ps._WORLD is None:
         vllm_ps._WORLD = init_world_group([0], 0, "nccl")
@@ -1016,7 +1016,7 @@ def test_varlen_throughput_stress():
     batch_denoise_time = time.perf_counter() - start
 
     with torch.inference_mode():
-        outputs_batch = [pipeline.post_decode(state) for state in states_batch]
+        [pipeline.post_decode(state) for state in states_batch]
 
     # Correctness is verified by per-request unit tests; here we only measure throughput.
 
@@ -1211,25 +1211,22 @@ def test_e2e_scheduler_heterogeneous_batch():
                 ib = InputBatch.make_batch([state])
                 pred = pipeline.denoise_step(ib)
                 pipeline.step_scheduler(state, pred)
-        outputs_serial = [pipeline.post_decode(state) for state in states_serial]
+        [pipeline.post_decode(state) for state in states_serial]
     torch.accelerator.synchronize()
     serial_time = time.perf_counter() - start
 
     # ── Phase F: correctness + performance report ──
     print(f"\n{'=' * 60}")
     print(f"E2E SCHEDULER HETEROGENEOUS BATCH ({num_reqs} reqs × {num_steps} steps)")
-    print(f"  Resolutions: 512x512, 768x768 | CFG: 4.0, 7.5")
+    print("  Resolutions: 512x512, 768x768 | CFG: 4.0, 7.5")
     print(f"{'=' * 60}")
 
-    all_pass = True
     for i in range(num_reqs):
         assert outputs[i].output is not None, f"Request {i} produced no output"
         mse = _image_mse(refs[i], outputs[i].output)
         cfg = configs[i]["cfg_scale"]
         res = configs[i]["image_size"]
         status = "PASS" if mse < 1.0 else "FAIL"
-        if mse >= 1.0:
-            all_pass = False
         print(f"  req[{i}] {res} cfg={cfg}: MSE={mse:.4f} [{status}]")
         assert mse < 1.0, f"Request {i} ({res}, cfg={cfg}) diverges: MSE={mse}"
 

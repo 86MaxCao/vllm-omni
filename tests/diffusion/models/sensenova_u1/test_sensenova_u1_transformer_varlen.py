@@ -10,7 +10,6 @@ All tests are CPU-only and do not require model weights.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -291,7 +290,6 @@ class TestModelForwardVarlen:
         ]
 
         call_count = {"n": 0}
-        original_varlen = type(model.layers[0])._forward_gen_varlen
 
         def counting_forward(self_layer, *args, **kwargs):
             call_count["n"] += 1

@@ -9,7 +9,7 @@ CFG is handled internally via state.extra["p"].cfg_scale.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -275,10 +275,6 @@ class TestCFGHandledInternally:
 
     def test_batched_denoise_uses_extra_cfg_scale_not_do_true_cfg(self) -> None:
         """_batched_denoise_step reads cfg_scale from extra['p'], not do_true_cfg."""
-        from vllm_omni.diffusion.models.sensenova_u1.pipeline_sensenova_u1 import (
-            SenseNovaU1Pipeline,
-        )
-
         pipeline = _make_pipeline()
 
         timesteps = torch.linspace(1.0, 0.0, 5)[:4]
