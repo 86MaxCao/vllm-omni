@@ -1242,7 +1242,8 @@ class TestHeterogeneousBatchScheduling:
     def test_allows_different_guidance_scale_when_configured(self) -> None:
         scheduler = self._make_scheduler(
             heterogeneous_batch_fields=[
-                "guidance_scale", "guidance_scale_2",
+                "guidance_scale",
+                "guidance_scale_2",
                 "guidance_scale_provided",
             ],
         )
@@ -1273,8 +1274,10 @@ class TestHeterogeneousBatchScheduling:
     def test_allows_different_resolution_and_guidance_scale_together(self) -> None:
         scheduler = self._make_scheduler(
             heterogeneous_batch_fields=[
-                "height", "width",
-                "guidance_scale", "guidance_scale_2",
+                "height",
+                "width",
+                "guidance_scale",
+                "guidance_scale_2",
                 "guidance_scale_provided",
             ],
         )
@@ -1283,7 +1286,8 @@ class TestHeterogeneousBatchScheduling:
             _make_step_request(
                 "a",
                 sampling_params=OmniDiffusionSamplingParams(
-                    height=1024, width=1024,
+                    height=1024,
+                    width=1024,
                     guidance_scale=4.0,
                     num_inference_steps=4,
                 ),
@@ -1293,7 +1297,8 @@ class TestHeterogeneousBatchScheduling:
             _make_step_request(
                 "b",
                 sampling_params=OmniDiffusionSamplingParams(
-                    height=2048, width=2048,
+                    height=2048,
+                    width=2048,
                     guidance_scale=7.5,
                     num_inference_steps=4,
                 ),

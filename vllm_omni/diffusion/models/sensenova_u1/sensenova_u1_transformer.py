@@ -560,7 +560,7 @@ class SenseNovaU1Attention(nn.Module):
             self.k_norm_hw_mot_gen,
         )
         # query_states: [1, H, total_S, D], key/value_states: [1, Hkv, total_S, D]
-        q = query_states.squeeze(0).transpose(0, 1).contiguous()    # [total_S, H, D]
+        q = query_states.squeeze(0).transpose(0, 1).contiguous()  # [total_S, H, D]
         k_cur = key_states.squeeze(0).transpose(0, 1).contiguous()  # [total_S, Hkv, D]
         v_cur = value_states.squeeze(0).transpose(0, 1).contiguous()
 
@@ -580,9 +580,13 @@ class SenseNovaU1Attention(nn.Module):
         v_packed = torch.cat(all_v, dim=0)
 
         attn_output = flash_attn_varlen_func(
-            q, k_packed, v_packed,
-            cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q, max_seqlen_k,
+            q,
+            k_packed,
+            v_packed,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
             softmax_scale=self.scaling,
             causal=False,
         )  # [total_S, H, D]
@@ -678,21 +682,19 @@ class SenseNovaU1DecoderLayer(nn.Module):
         return residual + hidden_states
 
     def _forward_gen_varlen(
-        self,
-        hidden_states,
-        indexes,
-        prefix_kv_list,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k
+        self, hidden_states, indexes, prefix_kv_list, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k
     ):
         """Varlen generation forward for one decoder layer."""
         residual = hidden_states
         hidden_states = self.input_layernorm_mot_gen(hidden_states)
         hidden_states = self.self_attn.forward_gen_varlen(
-            hidden_states, indexes, prefix_kv_list,
-            cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+            hidden_states,
+            indexes,
+            prefix_kv_list,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -864,6 +866,7 @@ class SenseNovaU1Model(nn.Module):
 
         hidden_states = self.norm_mot_gen(hidden_states)
         return SenseNovaU1ModelOutput(last_hidden_state=hidden_states)
+
 
 # ---------------------------------------------------------------------------
 # ForCausalLM wrapper

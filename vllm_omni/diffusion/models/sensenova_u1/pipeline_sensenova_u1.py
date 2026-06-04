@@ -1516,10 +1516,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
 
         indexes_image_cond = self._build_t2i_image_indexes(ns.token_h, ns.token_w, indexes_cond.shape[1], self.device)
         indexes_image_uncond = self._build_t2i_image_indexes(
-            ns.token_h,
-            ns.token_w,
-            indexes_uncond.shape[1],
-            self.device
+            ns.token_h, ns.token_w, indexes_uncond.shape[1], self.device
         )
 
         think_text = ""
@@ -1627,10 +1624,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         if needs_uncond:
             past_kv_uncond, _ = self._it2i_prefix_forward(embeds_uncond, idx_uncond, mask_uncond)
             idx_image_uncond = self._build_t2i_image_indexes(
-                ns.token_h,
-                ns.token_w,
-                idx_uncond[0].max().item() + 1,
-                self.device
+                ns.token_h, ns.token_w, idx_uncond[0].max().item() + 1, self.device
             )
             caches["uncond"] = past_kv_uncond
             caches["idx_uncond"] = idx_image_uncond
@@ -1639,11 +1633,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         # Expand all KV caches for batch size
         for key in ("cond", "img_cond", "uncond"):
             if key in caches and not isinstance(caches[key], dict):
-                self._expand_and_prepare_kv(
-                    caches[key],
-                    ns.token_h * ns.token_w,
-                    p.batch_size
-                )
+                self._expand_and_prepare_kv(caches[key], ns.token_h * ns.token_w, p.batch_size)
 
         return caches
 
@@ -1679,7 +1669,8 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         # InputBatch requires prompt_embeds to be set. For U1 the prompt
         # conditioning lives in KV caches, so we use a dummy 1-token embed.
         state.prompt_embeds = torch.zeros(
-            1, self.language_model.config.hidden_size,
+            1,
+            self.language_model.config.hidden_size,
             device=ns.image_prediction.device,
             dtype=ns.image_prediction.dtype,
         )
@@ -1779,9 +1770,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         )
         if self.top_cfg.add_noise_scale_embedding:
             ns_tensor = torch.full_like(t_expanded, ns.noise_scale / self.top_cfg.noise_scale_max_value)
-            ns_emb = self.fm_modules["noise_scale_embedder"](ns_tensor).view(
-                p.batch_size, ns.token_h * ns.token_w, -1
-            )
+            ns_emb = self.fm_modules["noise_scale_embedder"](ns_tensor).view(p.batch_size, ns.token_h * ns.token_w, -1)
             timestep_embeddings = timestep_embeddings + ns_emb
         image_embeds = image_embeds + timestep_embeddings
 
@@ -1799,9 +1788,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         N = len(per_req_data)
         device = image_embeds_list[0].device
 
-        packed_embeds = torch.cat(
-            [e.squeeze(0) for e in image_embeds_list], dim=0
-        ).unsqueeze(0)  # [1, total_S, D]
+        packed_embeds = torch.cat([e.squeeze(0) for e in image_embeds_list], dim=0).unsqueeze(0)  # [1, total_S, D]
         packed_indexes = torch.cat(indexes_list, dim=1)  # [3, total_S]
 
         q_lens = [e.shape[1] for e in image_embeds_list]
@@ -1815,9 +1802,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
 
         past_kv_list = [d["caches"][kv_key] for d in per_req_data]
         max_seqlen_q = max(q_lens)
-        max_seqlen_k = max(
-            int(cu_seqlens_k[i + 1] - cu_seqlens_k[i]) for i in range(N)
-        )
+        max_seqlen_k = max(int(cu_seqlens_k[i + 1] - cu_seqlens_k[i]) for i in range(N))
 
         outputs = self.language_model.forward_varlen(
             inputs_embeds=packed_embeds,
@@ -1836,7 +1821,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             ns = per_req_data[i]["ns"]
             p = per_req_data[i]["p"]
             step_index = per_req_data[i].get("_current_step_index", 0)
-            h_i = hidden[offset:offset + q_lens[i]].unsqueeze(0)  # [1, S, D]
+            h_i = hidden[offset : offset + q_lens[i]].unsqueeze(0)  # [1, S, D]
 
             image_prediction = per_req_data[i]["_image_prediction"]
             merge_size = ns.merge_size
@@ -1852,17 +1837,19 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 img_2d = torch.einsum("b h w c -> b c h w", img_reshaped).contiguous()
                 smoothed_img_2d = self.fm_modules["fm_head"](img_2d)
                 smoothed_reshaped = smoothed_img_2d.view(
-                    B, 3, token_h, self.patch_size * merge_size,
-                    token_w, self.patch_size * merge_size,
+                    B,
+                    3,
+                    token_h,
+                    self.patch_size * merge_size,
+                    token_w,
+                    self.patch_size * merge_size,
                 )
                 smoothed_reshaped = torch.einsum("b c h p w q -> b h w p q c", smoothed_reshaped)
                 x_pred = smoothed_reshaped.contiguous().view(
                     B, L, self.patch_size * merge_size * self.patch_size * merge_size * 3
                 )
             else:
-                x_pred = self.fm_modules["fm_head"](
-                    h_i[:, -image_token_num:].view(B, L, -1)
-                ).view(B, L, -1)
+                x_pred = self.fm_modules["fm_head"](h_i[:, -image_token_num:].view(B, L, -1)).view(B, L, -1)
 
             v_pred = (x_pred - z) / (1 - t).clamp_min(self.top_cfg.t_eps)
             results.append(v_pred)
@@ -1926,12 +1913,13 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         uncond_out: dict[int, torch.Tensor] = {}
         if needs_uncond_indices:
             uncond_embeds = [image_embeds_list[i] for i in needs_uncond_indices]
-            uncond_indexes_list = [
-                per_req_data[i]["caches"]["idx_uncond"] for i in needs_uncond_indices
-            ]
+            uncond_indexes_list = [per_req_data[i]["caches"]["idx_uncond"] for i in needs_uncond_indices]
             uncond_data = [per_req_data[i] for i in needs_uncond_indices]
             uncond_results = self._batched_predict_v(
-                uncond_embeds, uncond_indexes_list, uncond_data, kv_key="uncond",
+                uncond_embeds,
+                uncond_indexes_list,
+                uncond_data,
+                kv_key="uncond",
             )
             for j, i in enumerate(needs_uncond_indices):
                 uncond_out[i] = uncond_results[j]
@@ -1940,12 +1928,13 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         img_cond_out: dict[int, torch.Tensor] = {}
         if needs_img_cond_indices:
             img_cond_embeds = [image_embeds_list[i] for i in needs_img_cond_indices]
-            img_cond_indexes_list = [
-                per_req_data[i]["caches"]["idx_img_cond"] for i in needs_img_cond_indices
-            ]
+            img_cond_indexes_list = [per_req_data[i]["caches"]["idx_img_cond"] for i in needs_img_cond_indices]
             img_cond_data = [per_req_data[i] for i in needs_img_cond_indices]
             img_cond_results = self._batched_predict_v(
-                img_cond_embeds, img_cond_indexes_list, img_cond_data, kv_key="img_cond",
+                img_cond_embeds,
+                img_cond_indexes_list,
+                img_cond_data,
+                kv_key="img_cond",
             )
             for j, i in enumerate(needs_img_cond_indices):
                 img_cond_out[i] = img_cond_results[j]

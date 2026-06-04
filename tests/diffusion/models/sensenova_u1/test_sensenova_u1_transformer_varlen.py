@@ -56,10 +56,7 @@ class _MockCacheLayer:
 
 class _MockDynamicCache:
     def __init__(self, num_layers: int, prefix_lens: list[int], num_kv_heads: int, head_dim: int):
-        self.layers = [
-            _MockCacheLayer(prefix_lens[i], num_kv_heads, head_dim, seed=i)
-            for i in range(num_layers)
-        ]
+        self.layers = [_MockCacheLayer(prefix_lens[i], num_kv_heads, head_dim, seed=i) for i in range(num_layers)]
 
 
 def _make_attention():
@@ -74,7 +71,7 @@ def _make_attention():
     attn.num_heads = NUM_HEADS
     attn.num_kv_heads = NUM_KV_HEADS
     attn.head_dim = HEAD_DIM
-    attn.scaling = 1.0 / (HEAD_DIM ** 0.5)
+    attn.scaling = 1.0 / (HEAD_DIM**0.5)
     attn.layer_idx = 0
     attn.o_proj_mot_gen = _IdentityLinear()
     attn.qkv_proj_mot_gen = _IdentityLinear()
@@ -106,7 +103,6 @@ def _make_decoder_layer():
 
 
 class TestAttentionForwardGenVarlen:
-
     def test_output_shape_single_request(self) -> None:
         attn = _make_attention()
         total_S = 8
@@ -134,8 +130,13 @@ class TestAttentionForwardGenVarlen:
 
         with patch("flash_attn.flash_attn_varlen_func", side_effect=fake_flash_attn):
             out = attn.forward_gen_varlen(
-                hidden, indexes, [(prefix_k, prefix_v)],
-                cu_q, cu_k, total_S, 4 + total_S,
+                hidden,
+                indexes,
+                [(prefix_k, prefix_v)],
+                cu_q,
+                cu_k,
+                total_S,
+                4 + total_S,
             )
 
         assert out.shape == (1, total_S, HIDDEN_DIM)
@@ -148,8 +149,10 @@ class TestAttentionForwardGenVarlen:
         hidden = torch.randn(1, total_S, HIDDEN_DIM)
         indexes = torch.zeros(3, total_S, dtype=torch.long)
         prefix_kv = [
-            (torch.ones(prefix_lens[i], NUM_KV_HEADS, HEAD_DIM) * (i + 1),
-             torch.ones(prefix_lens[i], NUM_KV_HEADS, HEAD_DIM) * (i + 1))
+            (
+                torch.ones(prefix_lens[i], NUM_KV_HEADS, HEAD_DIM) * (i + 1),
+                torch.ones(prefix_lens[i], NUM_KV_HEADS, HEAD_DIM) * (i + 1),
+            )
             for i in range(2)
         ]
         cu_q = torch.tensor([0, q_lens[0], total_S], dtype=torch.int32)
@@ -177,8 +180,13 @@ class TestAttentionForwardGenVarlen:
 
         with patch("flash_attn.flash_attn_varlen_func", side_effect=fake_flash_attn):
             out = attn.forward_gen_varlen(
-                hidden, indexes, prefix_kv,
-                cu_q, cu_k, max(q_lens), max(p + q for p, q in zip(prefix_lens, q_lens)),
+                hidden,
+                indexes,
+                prefix_kv,
+                cu_q,
+                cu_k,
+                max(q_lens),
+                max(p + q for p, q in zip(prefix_lens, q_lens)),
             )
 
         assert out.shape == (1, total_S, HIDDEN_DIM)
@@ -220,7 +228,6 @@ class TestAttentionForwardGenVarlen:
 
 
 class TestDecoderLayerForwardGenVarlen:
-
     def test_residual_connections(self) -> None:
         layer = _make_decoder_layer()
         total_S = 6
@@ -234,7 +241,13 @@ class TestDecoderLayerForwardGenVarlen:
         layer.self_attn.forward_gen_varlen = MagicMock(return_value=attn_return)
 
         out = layer._forward_gen_varlen(
-            hidden, indexes, prefix_kv, cu_q, cu_k, total_S, total_S,
+            hidden,
+            indexes,
+            prefix_kv,
+            cu_q,
+            cu_k,
+            total_S,
+            total_S,
         )
 
         # residual1 = hidden(2) + attn(3) = 5
@@ -268,7 +281,6 @@ class TestDecoderLayerForwardGenVarlen:
 
 
 class TestModelForwardVarlen:
-
     def _make_model(self, num_layers=NUM_LAYERS):
         from vllm_omni.diffusion.models.sensenova_u1.sensenova_u1_transformer import (
             SenseNovaU1Model,
@@ -284,10 +296,7 @@ class TestModelForwardVarlen:
         model = self._make_model(num_layers=3)
         total_S = 4
         prefix_lens = [2, 3, 1]
-        caches = [
-            _MockDynamicCache(3, prefix_lens, NUM_KV_HEADS, HEAD_DIM)
-            for _ in range(1)
-        ]
+        caches = [_MockDynamicCache(3, prefix_lens, NUM_KV_HEADS, HEAD_DIM) for _ in range(1)]
 
         call_count = {"n": 0}
 
@@ -384,7 +393,9 @@ class TestModelForwardVarlen:
             dtype=torch.int32,
         )
 
-        model.forward_varlen(hidden, indexes, caches, cu_q, cu_k, max(q_lens), max(p + q for p, q in zip(prefix_lens, q_lens)))
+        model.forward_varlen(
+            hidden, indexes, caches, cu_q, cu_k, max(q_lens), max(p + q for p, q in zip(prefix_lens, q_lens))
+        )
 
         assert captured[0] == [(3, 3), (7, 7)]
 
@@ -395,7 +406,6 @@ class TestModelForwardVarlen:
 
 
 class TestForCausalLMForwardVarlen:
-
     def test_delegates_to_model(self) -> None:
         from vllm_omni.diffusion.models.sensenova_u1.sensenova_u1_transformer import (
             SenseNovaU1CausalLMOutput,
@@ -424,5 +434,11 @@ class TestForCausalLMForwardVarlen:
         assert isinstance(result, SenseNovaU1CausalLMOutput)
         torch.testing.assert_close(result.hidden_states, expected_hidden)
         mock_model.forward_varlen.assert_called_once_with(
-            inputs, indexes, [], cu_q, cu_k, 10, 15,
+            inputs,
+            indexes,
+            [],
+            cu_q,
+            cu_k,
+            10,
+            15,
         )

@@ -603,8 +603,7 @@ def test_varlen_batched_correctness():
 
     # Varlen batch: 2 requests with different prompts → different prefix lengths
     states = [
-        _make_state(_build_request(prompt=prompt, seed=700 + i), f"varlen_{i}")
-        for i, prompt in enumerate(prompts)
+        _make_state(_build_request(prompt=prompt, seed=700 + i), f"varlen_{i}") for i, prompt in enumerate(prompts)
     ]
 
     with torch.inference_mode():
@@ -622,7 +621,7 @@ def test_varlen_batched_correctness():
             offset = 0
             for state in active:
                 row_num = state.latents.shape[0]
-                pipeline.step_scheduler(state, noise_pred[offset:offset + row_num])
+                pipeline.step_scheduler(state, noise_pred[offset : offset + row_num])
                 offset += row_num
 
         outputs = [pipeline.post_decode(state) for state in states]
@@ -655,8 +654,7 @@ def test_varlen_heterogeneous_resolution():
         refs.append(out.output)
 
     states = [
-        _make_state(_build_request(image_size=res, seed=800 + i), f"vres_{i}")
-        for i, res in enumerate(resolutions)
+        _make_state(_build_request(image_size=res, seed=800 + i), f"vres_{i}") for i, res in enumerate(resolutions)
     ]
 
     with torch.inference_mode():
@@ -684,7 +682,7 @@ def test_varlen_heterogeneous_resolution():
                     offset = 0
                     for s in group:
                         rows = s.latents.shape[0]
-                        all_preds_map[s.request_id] = pred[offset:offset + rows]
+                        all_preds_map[s.request_id] = pred[offset : offset + rows]
                         offset += rows
 
                 for s in active:
@@ -722,10 +720,7 @@ def test_varlen_mixed_cfg():
             out = pipeline(req)
         refs.append(out.output)
 
-    states = [
-        _make_state(_build_request(cfg_scale=cfg, seed=900 + i), f"vcfg_{i}")
-        for i, cfg in enumerate(cfg_scales)
-    ]
+    states = [_make_state(_build_request(cfg_scale=cfg, seed=900 + i), f"vcfg_{i}") for i, cfg in enumerate(cfg_scales)]
 
     with torch.inference_mode():
         for state in states:
@@ -742,7 +737,7 @@ def test_varlen_mixed_cfg():
             offset = 0
             for state in active:
                 row_num = state.latents.shape[0]
-                pipeline.step_scheduler(state, noise_pred[offset:offset + row_num])
+                pipeline.step_scheduler(state, noise_pred[offset : offset + row_num])
                 offset += row_num
 
         outputs = [pipeline.post_decode(state) for state in states]
@@ -769,8 +764,7 @@ def test_varlen_throughput():
 
     # Time for-loop serial: each request processed individually
     states_serial = [
-        _make_state(_build_request(num_steps=num_steps, seed=1000 + i), f"serial_{i}")
-        for i in range(num_reqs)
+        _make_state(_build_request(num_steps=num_steps, seed=1000 + i), f"serial_{i}") for i in range(num_reqs)
     ]
 
     torch.accelerator.synchronize()
@@ -795,8 +789,7 @@ def test_varlen_throughput():
 
     # Time varlen batch: all requests batched
     states_batch = [
-        _make_state(_build_request(num_steps=num_steps, seed=1000 + i), f"batch_{i}")
-        for i in range(num_reqs)
+        _make_state(_build_request(num_steps=num_steps, seed=1000 + i), f"batch_{i}") for i in range(num_reqs)
     ]
 
     torch.accelerator.synchronize()
@@ -814,7 +807,7 @@ def test_varlen_throughput():
             offset = 0
             for state in active:
                 row_num = state.latents.shape[0]
-                pipeline.step_scheduler(state, noise_pred[offset:offset + row_num])
+                pipeline.step_scheduler(state, noise_pred[offset : offset + row_num])
                 offset += row_num
 
         for state in states_batch:
@@ -886,7 +879,7 @@ def test_dynamic_join_leave():
                 offset = 0
                 for s in active:
                     rows = s.latents.shape[0]
-                    pipeline.step_scheduler(s, noise_pred[offset:offset + rows])
+                    pipeline.step_scheduler(s, noise_pred[offset : offset + rows])
                     offset += rows
             elif active:
                 ib = InputBatch.make_batch(active)
@@ -1010,7 +1003,7 @@ def test_varlen_throughput_stress():
             offset = 0
             for state in active:
                 row_num = state.latents.shape[0]
-                pipeline.step_scheduler(state, noise_pred[offset:offset + row_num])
+                pipeline.step_scheduler(state, noise_pred[offset : offset + row_num])
                 offset += row_num
     torch.accelerator.synchronize()
     batch_denoise_time = time.perf_counter() - start
@@ -1116,8 +1109,11 @@ def test_e2e_scheduler_heterogeneous_batch():
         dtype=torch.bfloat16,
     )
     od_config.heterogeneous_batch_fields = [
-        "height", "width",
-        "guidance_scale", "guidance_scale_2", "guidance_scale_provided",
+        "height",
+        "width",
+        "guidance_scale",
+        "guidance_scale_2",
+        "guidance_scale_provided",
     ]
 
     scheduler = StepScheduler()
@@ -1128,7 +1124,10 @@ def test_e2e_scheduler_heterogeneous_batch():
     requests = []
     for i in range(num_reqs):
         req = _build_scheduler_request(
-            prompts[i], configs[i]["image_size"], configs[i]["cfg_scale"], 700 + i,
+            prompts[i],
+            configs[i]["image_size"],
+            configs[i]["cfg_scale"],
+            700 + i,
         )
         requests.append(req)
         sched_req_ids.append(scheduler.add_request(req))
@@ -1137,8 +1136,7 @@ def test_e2e_scheduler_heterogeneous_batch():
     scheduled_count = len(sched_output.scheduled_new_reqs) + len(sched_output.scheduled_cached_reqs.request_ids)
     print(f"\n  Scheduler batched {scheduled_count}/{num_reqs} requests together")
     assert scheduled_count == num_reqs, (
-        f"Scheduler only batched {scheduled_count}/{num_reqs} — "
-        f"heterogeneous_batch_fields not working end-to-end"
+        f"Scheduler only batched {scheduled_count}/{num_reqs} — heterogeneous_batch_fields not working end-to-end"
     )
 
     # ── Phase C: create states from schedule output (mimic runner) ──
@@ -1177,7 +1175,7 @@ def test_e2e_scheduler_heterogeneous_batch():
                 offset = 0
                 for s in group:
                     rows = s.latents.shape[0]
-                    all_preds_map[s.request_id] = pred[offset:offset + rows]
+                    all_preds_map[s.request_id] = pred[offset : offset + rows]
                     offset += rows
 
             for s in active:

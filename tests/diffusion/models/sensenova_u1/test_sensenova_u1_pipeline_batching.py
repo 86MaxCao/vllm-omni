@@ -23,7 +23,7 @@ IMAGE_SIZE = (64, 64)
 TOKEN_H = IMAGE_SIZE[1] // PATCH_SIZE  # 4
 TOKEN_W = IMAGE_SIZE[0] // PATCH_SIZE  # 4
 NUM_TOKENS = TOKEN_H * TOKEN_W  # 16
-OUTPUT_DIM = 3 * PATCH_SIZE ** 2  # 768
+OUTPUT_DIM = 3 * PATCH_SIZE**2  # 768
 
 
 # ============================================================
@@ -33,6 +33,7 @@ OUTPUT_DIM = 3 * PATCH_SIZE ** 2  # 768
 
 class _FnModule(nn.Module):
     """Wrap a callable as an nn.Module (for use inside ModuleDict)."""
+
     def __init__(self, fn):
         super().__init__()
         self._fn = fn
@@ -161,15 +162,15 @@ def _make_pipeline():
     pipeline.language_model = mock_lm
 
     # Stub fm_modules
-    pipeline.fm_modules = nn.ModuleDict({
-        "timestep_embedder": nn.Identity(),
-        "fm_head": nn.Linear(HIDDEN_DIM, OUTPUT_DIM, bias=False),
-    })
+    pipeline.fm_modules = nn.ModuleDict(
+        {
+            "timestep_embedder": nn.Identity(),
+            "fm_head": nn.Linear(HIDDEN_DIM, OUTPUT_DIM, bias=False),
+        }
+    )
 
     # Stub _extract_feature to return identity-like output
-    pipeline._extract_feature = lambda x, gen_model=False, grid_hw=None: torch.randn(
-        x.shape[0], HIDDEN_DIM
-    )
+    pipeline._extract_feature = lambda x, gen_model=False, grid_hw=None: torch.randn(x.shape[0], HIDDEN_DIM)
 
     return pipeline
 
@@ -180,7 +181,6 @@ def _make_pipeline():
 
 
 class TestDenoiseStepDispatch:
-
     def test_single_request_calls_fast_path(self) -> None:
         pipeline = _make_pipeline()
         state = _make_step_state("req_0")
@@ -225,7 +225,6 @@ class TestDenoiseStepDispatch:
 
 
 class TestPrepareSingleEmbeds:
-
     def test_adds_timestep_embedding(self) -> None:
         pipeline = _make_pipeline()
         state = _make_step_state("req", step_index=0)
@@ -268,9 +267,7 @@ class TestPrepareSingleEmbeds:
         expected_indexes = state["caches"]["idx_cond"]
 
         pipeline._extract_feature = MagicMock(return_value=torch.randn(NUM_TOKENS, HIDDEN_DIM))
-        pipeline.fm_modules["timestep_embedder"] = _FnModule(
-            lambda x: torch.zeros(NUM_TOKENS, HIDDEN_DIM)
-        )
+        pipeline.fm_modules["timestep_embedder"] = _FnModule(lambda x: torch.zeros(NUM_TOKENS, HIDDEN_DIM))
 
         _, indexes = pipeline._prepare_single_embeds(state)
         assert indexes is expected_indexes
@@ -282,7 +279,6 @@ class TestPrepareSingleEmbeds:
 
 
 class TestBatchedPredictV:
-
     def test_packs_embeds_correctly(self) -> None:
         pipeline = _make_pipeline()
 
@@ -300,9 +296,7 @@ class TestBatchedPredictV:
         def mock_forward_varlen(**kwargs):
             captured.update(kwargs)
             total_s = kwargs["inputs_embeds"].shape[1]
-            return SimpleNamespace(
-                hidden_states=torch.randn(1, total_s, HIDDEN_DIM)
-            )
+            return SimpleNamespace(hidden_states=torch.randn(1, total_s, HIDDEN_DIM))
 
         pipeline.language_model.forward_varlen = mock_forward_varlen
 
@@ -377,14 +371,15 @@ class TestBatchedPredictV:
 
 
 class TestBatchedDenoiseStep:
-
     def _setup_pipeline_for_batch(self, pipeline, req_ids, cfg_scales=None, step_index=0):
         if cfg_scales is None:
             cfg_scales = [4.0] * len(req_ids)
 
         for i, req_id in enumerate(req_ids):
             pipeline._step_states[req_id] = _make_step_state(
-                req_id, cfg_scale=cfg_scales[i], step_index=step_index,
+                req_id,
+                cfg_scale=cfg_scales[i],
+                step_index=step_index,
             )
 
         # Mock _prepare_single_embeds to return known tensors
@@ -529,7 +524,7 @@ class TestBatchedDenoiseStep:
 
         def mock_predict_v(embeds, indexes, data, kv_key):
             if kv_key == "cond":
-                return cond_vals[:len(data)]
+                return cond_vals[: len(data)]
             return [uncond_val]
 
         pipeline._batched_predict_v = mock_predict_v
@@ -701,7 +696,10 @@ class TestBatchedDenoiseStep:
         """cfg_zero_star at step>0 uses _optimized_scale for alpha."""
         pipeline = _make_pipeline()
         pipeline._step_states["a"] = _make_step_state(
-            "a", cfg_scale=4.0, cfg_norm="cfg_zero_star", step_index=1,
+            "a",
+            cfg_scale=4.0,
+            cfg_norm="cfg_zero_star",
+            step_index=1,
         )
 
         cond_v = torch.ones(1, NUM_TOKENS, OUTPUT_DIM) * 2.0
@@ -730,7 +728,10 @@ class TestBatchedDenoiseStep:
         """cfg_zero_star at step_index=0 returns all zeros (out_cond * 0.0)."""
         pipeline = _make_pipeline()
         pipeline._step_states["a"] = _make_step_state(
-            "a", cfg_scale=4.0, cfg_norm="cfg_zero_star", step_index=0,
+            "a",
+            cfg_scale=4.0,
+            cfg_norm="cfg_zero_star",
+            step_index=0,
         )
 
         cond_v = torch.ones(1, NUM_TOKENS, OUTPUT_DIM) * 5.0

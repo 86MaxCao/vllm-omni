@@ -23,7 +23,7 @@ IMAGE_SIZE = (64, 64)
 TOKEN_H = IMAGE_SIZE[1] // PATCH_SIZE
 TOKEN_W = IMAGE_SIZE[0] // PATCH_SIZE
 NUM_TOKENS = TOKEN_H * TOKEN_W
-OUTPUT_DIM = 3 * PATCH_SIZE ** 2
+OUTPUT_DIM = 3 * PATCH_SIZE**2
 
 
 def _make_pipeline():
@@ -49,10 +49,12 @@ def _make_pipeline():
     mock_lm.config = SimpleNamespace(hidden_size=HIDDEN_DIM)
     pipeline.language_model = mock_lm
 
-    pipeline.fm_modules = nn.ModuleDict({
-        "timestep_embedder": nn.Identity(),
-        "fm_head": nn.Linear(HIDDEN_DIM, OUTPUT_DIM, bias=False),
-    })
+    pipeline.fm_modules = nn.ModuleDict(
+        {
+            "timestep_embedder": nn.Identity(),
+            "fm_head": nn.Linear(HIDDEN_DIM, OUTPUT_DIM, bias=False),
+        }
+    )
 
     return pipeline
 
@@ -77,7 +79,6 @@ def _make_fake_state(cfg_scale=4.0):
 
 
 class TestPrepareCFGBypass:
-
     def test_prepare_encode_sets_do_true_cfg_false(self) -> None:
         pipeline = _make_pipeline()
         state = _make_fake_state(cfg_scale=7.5)
@@ -218,7 +219,6 @@ class TestPrepareCFGBypass:
         assert state.do_true_cfg is False
         assert state.extra["p"].cfg_scale == 1.0
 
-
     def test_prepare_encode_it2i_sets_do_true_cfg_false(self) -> None:
         """IT2I path also sets do_true_cfg=False."""
         pipeline = _make_pipeline()
@@ -272,7 +272,6 @@ class TestPrepareCFGBypass:
 
 
 class TestCFGHandledInternally:
-
     def test_batched_denoise_uses_extra_cfg_scale_not_do_true_cfg(self) -> None:
         """_batched_denoise_step reads cfg_scale from extra['p'], not do_true_cfg."""
         pipeline = _make_pipeline()
