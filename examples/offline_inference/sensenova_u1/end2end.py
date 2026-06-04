@@ -172,6 +172,11 @@ def parse_args():
         action="store_true",
         help="Enable cache-dit summary logging after diffusion forward passes.",
     )
+    parser.add_argument(
+        "--step-execution",
+        action="store_true",
+        help="Enable step-execution mode for online dynamic batching.",
+    )
 
     return parser.parse_args()
 
@@ -201,6 +206,7 @@ def main():
         cache_backend=args.cache_backend,
         enable_cache_dit_summary=args.enable_cache_dit_summary,
         cfg_parallel_size=args.cfg_parallel_size,
+        step_execution=args.step_execution,
     )
 
     extra_args = {
@@ -246,6 +252,7 @@ def main():
     print(f"  TP size        : {args.tensor_parallel_size}")
     print(f"  CFG size       : {args.cfg_parallel_size}")
     print(f"  Cache backend  : {args.cache_backend or 'none'}")
+    print(f"  Step execution : {args.step_execution}")
     print(f"{'=' * 60}\n")
 
     # Build prompt dict
