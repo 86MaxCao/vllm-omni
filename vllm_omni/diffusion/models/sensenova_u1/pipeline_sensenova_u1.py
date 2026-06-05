@@ -68,6 +68,19 @@ IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
 IMG_CONTEXT_TOKEN = "<IMG_CONTEXT>"
 
+THINK_ON = "<think>\n"
+THINK_OFF = "<think>\n\n</think>\n\n"
+
+COND = "cond"
+UNCOND = "uncond"
+IMG_COND = "img_cond"
+IDX_COND = "idx_cond"
+IDX_UNCOND = "idx_uncond"
+IDX_IMG_COND = "idx_img_cond"
+MASK_COND = "mask_cond"
+MASK_UNCOND = "mask_uncond"
+MASK_IMG_COND = "mask_img_cond"
+
 SYSTEM_MESSAGE_FOR_GEN = (
     "You are an image generation and editing assistant that accurately understands and executes "
     "user intent.\n\nYou support two modes:\n\n1. Think Mode:\nIf the task requires reasoning, you "
@@ -1044,7 +1057,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 prefix = "<image>\n" * (n_images - image_count)
             prompt = prefix + prompt
 
-        think_content = "<think>\n" if think_mode else "<think>\n\n</think>\n\n" + IMG_START_TOKEN
+        think_content = THINK_ON if think_mode else THINK_OFF + IMG_START_TOKEN
         query = _build_t2i_query(prompt, system_message=SYSTEM_MESSAGE_FOR_GEN, append_text=think_content)
 
         for i in range(images["grid_hw"].shape[0]):
@@ -1114,6 +1127,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             kwargs["cache_dit_skip"] = True
         return kwargs
 
+<<<<<<< HEAD
     def _denoise(self, image_prediction, ns, t, z, image_embeds, caches, p, step_i, is_it2i):
         if not is_it2i:
             has_cached_partner = t >= p.cfg_interval[0] and t <= p.cfg_interval[1] and p.cfg_scale > 1
@@ -1239,6 +1253,38 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             v_pred = v_pred * (norm_c / (norm_v + 1e-8)).clamp(0, 1.0)
         return v_pred
 
+    def _combine_cfg(self, out_cond, out_uncond, out_img_cond, p, step_index):
+        """Combine model predictions using classifier-free guidance.
+
+        Handles T2I (two-way CFG with cfg_zero_star) and IT2I (dual CFG).
+        """
+        if out_img_cond is not None:
+            if out_uncond is not None:
+                v_pred = (
+                    out_uncond + p.cfg_scale * (out_cond - out_img_cond) + p.img_cfg_scale * (out_img_cond - out_uncond)
+                )
+            else:
+                v_pred = out_img_cond + p.cfg_scale * (out_cond - out_img_cond)
+            if p.cfg_scale > 1 or p.img_cfg_scale > 1:
+                v_pred = self._apply_cfg_norm(v_pred, out_cond, p.cfg_norm)
+        elif out_uncond is not None:
+            if p.cfg_norm == "cfg_zero_star":
+                pos_flat = out_cond.view(p.batch_size, -1)
+                neg_flat = out_uncond.view(p.batch_size, -1)
+                alpha = _optimized_scale(pos_flat, neg_flat)
+                alpha = alpha.view(p.batch_size, *([1] * (len(out_cond.shape) - 1))).to(pos_flat.dtype)
+                v_pred = (
+                    out_cond * 0.0
+                    if step_index <= 0
+                    else (out_uncond * alpha + p.cfg_scale * (out_cond - out_uncond * alpha))
+                )
+            else:
+                v_pred = out_uncond + p.cfg_scale * (out_cond - out_uncond)
+                v_pred = self._apply_cfg_norm(v_pred, out_cond, p.cfg_norm)
+        else:
+            v_pred = out_cond
+        return v_pred
+
     def _expand_and_prepare_kv(self, kv, token_hw, batch_size):
         """Expand KV cache for batch and prepare flash attention buffers."""
         for layer in kv.layers:
@@ -1265,7 +1311,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         """Text-to-image generation path."""
         ns = self._init_noise_and_schedule(p)
 
-        think_content = "<think>\n" if p.think_mode else "<think>\n\n</think>\n\n" + IMG_START_TOKEN
+        think_content = THINK_ON if p.think_mode else THINK_OFF + IMG_START_TOKEN
         query_cond = _build_t2i_query(p.prompt, system_message=SYSTEM_MESSAGE_FOR_GEN, append_text=think_content)
         query_uncond = _build_t2i_query("", append_text=IMG_START_TOKEN)
 
@@ -1298,12 +1344,12 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         self._expand_and_prepare_kv(past_kv_uncond, ns.token_h * ns.token_w, p.batch_size)
 
         caches = {
-            "cond": past_kv_cond,
-            "idx_cond": indexes_image_cond,
-            "mask_cond": {"full_attention": None},
-            "uncond": past_kv_uncond,
-            "idx_uncond": indexes_image_uncond,
-            "mask_uncond": {"full_attention": None},
+            COND: past_kv_cond,
+            IDX_COND: indexes_image_cond,
+            MASK_COND: {"full_attention": None},
+            UNCOND: past_kv_uncond,
+            IDX_UNCOND: indexes_image_uncond,
+            MASK_UNCOND: {"full_attention": None},
         }
         return self._run_denoising_loop(ns, caches, p, think_text, is_it2i=False)
 
@@ -1323,16 +1369,15 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         query_cond = self._build_it2i_query(p.prompt, images_info, p.think_mode)
         embeds_cond, idx_cond, mask_cond = self._build_it2i_inputs(query_cond, pixel_values, grid_hw)
 
-        # --- Image-only condition: just "<image>" placeholders + pixel values ---
+        # --- Image-only condition: image tokens + pixel values (no text) ---
         if needs_img_cond:
-            img_only_prompt = "<image>" * grid_hw.shape[0]
-            think_off = "<think>\n\n</think>\n\n" + IMG_START_TOKEN
-            query_img_cond = _build_t2i_query(img_only_prompt, append_text=think_off)
+            image_parts = []
             for i in range(grid_hw.shape[0]):
                 h, w = grid_hw[i]
                 num_patch = int(h * w * self.downsample_ratio**2)
-                tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_patch + IMG_END_TOKEN
-                query_img_cond = query_img_cond.replace("<image>", tokens, 1)
+                image_parts.append(IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_patch + IMG_END_TOKEN)
+            img_only_prompt = "".join(image_parts)
+            query_img_cond = _build_t2i_query(img_only_prompt, append_text=THINK_OFF + IMG_START_TOKEN)
             embeds_img_cond, idx_img_cond, mask_img_cond = self._build_it2i_inputs(
                 query_img_cond,
                 pixel_values,
@@ -1380,9 +1425,9 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             )
 
         caches = {
-            "cond": past_kv_cond,
-            "idx_cond": idx_image_cond,
-            "mask_cond": {"full_attention": None},
+            COND: past_kv_cond,
+            IDX_COND: idx_image_cond,
+            MASK_COND: {"full_attention": None},
         }
 
         if needs_img_cond:
@@ -1393,9 +1438,9 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 idx_img_cond[0].max().item() + 1,
                 self.device,
             )
-            caches["img_cond"] = past_kv_img_cond
-            caches["idx_img_cond"] = idx_image_img_cond
-            caches["mask_img_cond"] = {"full_attention": None}
+            caches[IMG_COND] = past_kv_img_cond
+            caches[IDX_IMG_COND] = idx_image_img_cond
+            caches[MASK_IMG_COND] = {"full_attention": None}
 
         if needs_uncond:
             past_kv_uncond, _ = self._it2i_prefix_forward(embeds_uncond, idx_uncond, mask_uncond)
@@ -1405,9 +1450,9 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 idx_uncond[0].max().item() + 1,
                 self.device,
             )
-            caches["uncond"] = past_kv_uncond
-            caches["idx_uncond"] = idx_image_uncond
-            caches["mask_uncond"] = {"full_attention": None}
+            caches[UNCOND] = past_kv_uncond
+            caches[IDX_UNCOND] = idx_image_uncond
+            caches[MASK_UNCOND] = {"full_attention": None}
 
         # Free vision tensors
         del pixel_values, grid_hw, embeds_cond, idx_cond, mask_cond
@@ -1417,7 +1462,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             del embeds_uncond, idx_uncond, mask_uncond
 
         # Expand all KV caches for batch
-        for key in ("cond", "img_cond", "uncond"):
+        for key in (COND, IMG_COND, UNCOND):
             if key in caches and not isinstance(caches[key], dict):
                 self._expand_and_prepare_kv(caches[key], ns.token_h * ns.token_w, p.batch_size)
 
@@ -1461,7 +1506,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             image_prediction = _unpatchify(z, self.patch_size * merge_size, p.image_size[1], p.image_size[0])
 
         # Cleanup KV caches
-        for key in ("cond", "uncond", "img_cond"):
+        for key in (COND, UNCOND, IMG_COND):
             if key in caches and not isinstance(caches[key], dict):
                 clear_flash_kv_cache(caches[key])
 
@@ -1507,7 +1552,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
 
     def _build_t2i_caches(self, p: SimpleNamespace, ns: SimpleNamespace) -> dict[str, Any]:
         """Build KV caches for text-to-image generation."""
-        think_content = "<think>\n" if p.think_mode else "<think>\n\n</think>\n\n" + IMG_START_TOKEN
+        think_content = THINK_ON if p.think_mode else THINK_OFF + IMG_START_TOKEN
         query_cond = _build_t2i_query(p.prompt, system_message=SYSTEM_MESSAGE_FOR_GEN, append_text=think_content)
         query_uncond = _build_t2i_query("", append_text=IMG_START_TOKEN)
 
@@ -1540,12 +1585,12 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         self._expand_and_prepare_kv(past_kv_uncond, ns.token_h * ns.token_w, p.batch_size)
 
         return {
-            "cond": past_kv_cond,
-            "idx_cond": indexes_image_cond,
-            "mask_cond": {"full_attention": None},
-            "uncond": past_kv_uncond,
-            "idx_uncond": indexes_image_uncond,
-            "mask_uncond": {"full_attention": None},
+            COND: past_kv_cond,
+            IDX_COND: indexes_image_cond,
+            MASK_COND: {"full_attention": None},
+            UNCOND: past_kv_uncond,
+            IDX_UNCOND: indexes_image_uncond,
+            MASK_UNCOND: {"full_attention": None},
             "think_text": think_text,
         }
 
@@ -1567,14 +1612,13 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         embeds_cond, idx_cond, mask_cond = self._build_it2i_inputs(query_cond, pixel_values, grid_hw)
 
         if needs_img_cond:
-            img_only_prompt = "<image>" * grid_hw.shape[0]
-            think_off = "<think>\n\n</think>\n\n" + IMG_START_TOKEN
-            query_img_cond = _build_t2i_query(img_only_prompt, append_text=think_off)
+            image_parts = []
             for i in range(grid_hw.shape[0]):
                 h, w = grid_hw[i]
                 num_patch = int(h * w * self.downsample_ratio**2)
-                tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_patch + IMG_END_TOKEN
-                query_img_cond = query_img_cond.replace("<image>", tokens, 1)
+                image_parts.append(IMG_START_TOKEN + IMG_CONTEXT_TOKEN * num_patch + IMG_END_TOKEN)
+            img_only_prompt = "".join(image_parts)
+            query_img_cond = _build_t2i_query(img_only_prompt, append_text=THINK_OFF + IMG_START_TOKEN)
             embeds_img_cond, idx_img_cond, mask_img_cond = self._build_it2i_inputs(
                 query_img_cond, pixel_values, grid_hw
             )
@@ -1606,9 +1650,9 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             )
 
         caches: dict[str, Any] = {
-            "cond": past_kv_cond,
-            "idx_cond": idx_image_cond,
-            "mask_cond": {"full_attention": None},
+            COND: past_kv_cond,
+            IDX_COND: idx_image_cond,
+            MASK_COND: {"full_attention": None},
             "think_text": think_text,
         }
 
@@ -1617,21 +1661,21 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             idx_image_img_cond = self._build_t2i_image_indexes(
                 ns.token_h, ns.token_w, idx_img_cond[0].max().item() + 1, self.device
             )
-            caches["img_cond"] = past_kv_img_cond
-            caches["idx_img_cond"] = idx_image_img_cond
-            caches["mask_img_cond"] = {"full_attention": None}
+            caches[IMG_COND] = past_kv_img_cond
+            caches[IDX_IMG_COND] = idx_image_img_cond
+            caches[MASK_IMG_COND] = {"full_attention": None}
 
         if needs_uncond:
             past_kv_uncond, _ = self._it2i_prefix_forward(embeds_uncond, idx_uncond, mask_uncond)
             idx_image_uncond = self._build_t2i_image_indexes(
                 ns.token_h, ns.token_w, idx_uncond[0].max().item() + 1, self.device
             )
-            caches["uncond"] = past_kv_uncond
-            caches["idx_uncond"] = idx_image_uncond
-            caches["mask_uncond"] = {"full_attention": None}
+            caches[UNCOND] = past_kv_uncond
+            caches[IDX_UNCOND] = idx_image_uncond
+            caches[MASK_UNCOND] = {"full_attention": None}
 
         # Expand all KV caches for batch size
-        for key in ("cond", "img_cond", "uncond"):
+        for key in (COND, IMG_COND, UNCOND):
             if key in caches and not isinstance(caches[key], dict):
                 self._expand_and_prepare_kv(caches[key], ns.token_h * ns.token_w, p.batch_size)
 
@@ -1698,30 +1742,10 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         p = extra["p"]
         ns = extra["ns"]
         caches = extra["caches"]
-        merge_size = ns.merge_size
-
         t = ns.timesteps[step_index]
-
-        z = _patchify(image_prediction, self.patch_size * merge_size)
-        image_input = _patchify(image_prediction, self.patch_size, channel_first=True)
-        image_embeds = self._extract_feature(
-            image_input.view(p.batch_size * ns.grid_h * ns.grid_w, -1),
-            gen_model=True,
-            grid_hw=ns.grid_hw,
-        ).view(p.batch_size, ns.token_h * ns.token_w, -1)
-
-        t_expanded = t.expand(p.batch_size * ns.token_h * ns.token_w)
-        timestep_embeddings = self.fm_modules["timestep_embedder"](t_expanded).view(
-            p.batch_size, ns.token_h * ns.token_w, -1
-        )
-        if self.top_cfg.add_noise_scale_embedding:
-            ns_tensor = torch.full_like(t_expanded, ns.noise_scale / self.top_cfg.noise_scale_max_value)
-            ns_emb = self.fm_modules["noise_scale_embedder"](ns_tensor).view(p.batch_size, ns.token_h * ns.token_w, -1)
-            timestep_embeddings = timestep_embeddings + ns_emb
-        image_embeds = image_embeds + timestep_embeddings
-
-        v_pred = self._denoise_step(image_prediction, ns, t, z, image_embeds, caches, p, step_index)
-        return v_pred
+        z = _patchify(image_prediction, self.patch_size * ns.merge_size)
+        image_embeds, _ = self._prepare_single_embeds(extra)
+        return self._denoise_step(image_prediction, ns, t, z, image_embeds, caches, p, step_index)
 
     def denoise_step(
         self,
@@ -1774,7 +1798,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             timestep_embeddings = timestep_embeddings + ns_emb
         image_embeds = image_embeds + timestep_embeddings
 
-        indexes = extra["caches"]["idx_cond"]
+        indexes = extra["caches"][IDX_COND]
         return image_embeds, indexes
 
     def _batched_predict_v(
@@ -1784,44 +1808,40 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         per_req_data: list[dict[str, Any]],
         kv_key: str,
     ) -> list[torch.Tensor]:
-        """Batched forward via language_model.forward_varlen, returns per-request v_pred."""
+        """Batched forward via padded layout + attention mask, returns per-request v_pred."""
         N = len(per_req_data)
         device = image_embeds_list[0].device
-
-        packed_embeds = torch.cat([e.squeeze(0) for e in image_embeds_list], dim=0).unsqueeze(0)  # [1, total_S, D]
-        packed_indexes = torch.cat(indexes_list, dim=1)  # [3, total_S]
+        dtype = image_embeds_list[0].dtype
+        hidden_dim = image_embeds_list[0].shape[-1]
 
         q_lens = [e.shape[1] for e in image_embeds_list]
-        cu_seqlens_q = torch.zeros(N + 1, dtype=torch.int32, device=device)
-        cu_seqlens_k = torch.zeros(N + 1, dtype=torch.int32, device=device)
+        max_q_len = max(q_lens)
+
+        padded_embeds = torch.zeros(N, max_q_len, hidden_dim, device=device, dtype=dtype)
         for i in range(N):
-            cache = per_req_data[i]["caches"][kv_key]
-            prefix_len = cache.layers[0].flash_prefix_len
-            cu_seqlens_q[i + 1] = cu_seqlens_q[i] + q_lens[i]
-            cu_seqlens_k[i + 1] = cu_seqlens_k[i] + prefix_len + q_lens[i]
+            padded_embeds[i, : q_lens[i]] = image_embeds_list[i].squeeze(0)
+
+        idx_dim = indexes_list[0].shape[0]  # 3
+        padded_indexes = torch.zeros(idx_dim, N, max_q_len, device=device, dtype=indexes_list[0].dtype)
+        for i in range(N):
+            padded_indexes[:, i, : q_lens[i]] = indexes_list[i]
 
         past_kv_list = [d["caches"][kv_key] for d in per_req_data]
-        max_seqlen_q = max(q_lens)
-        max_seqlen_k = max(int(cu_seqlens_k[i + 1] - cu_seqlens_k[i]) for i in range(N))
 
-        outputs = self.language_model.forward_varlen(
-            inputs_embeds=packed_embeds,
-            indexes=packed_indexes,
+        outputs = self.language_model.forward_gen_batched(
+            inputs_embeds=padded_embeds,
+            indexes=padded_indexes,
             past_key_values_list=past_kv_list,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
+            q_lens=q_lens,
         )
 
-        hidden = outputs.hidden_states.squeeze(0)  # [total_S, D]
+        hidden = outputs.hidden_states  # [N, max_q_len, D]
         results = []
-        offset = 0
         for i in range(N):
             ns = per_req_data[i]["ns"]
             p = per_req_data[i]["p"]
             step_index = per_req_data[i].get("_current_step_index", 0)
-            h_i = hidden[offset : offset + q_lens[i]].unsqueeze(0)  # [1, S, D]
+            h_i = hidden[i : i + 1, : q_lens[i]]  # [1, S, D]
 
             image_prediction = per_req_data[i]["_image_prediction"]
             merge_size = ns.merge_size
@@ -1853,7 +1873,6 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
 
             v_pred = (x_pred - z) / (1 - t).clamp_min(self.top_cfg.t_eps)
             results.append(v_pred)
-            offset += q_lens[i]
 
         return results
 
@@ -1873,7 +1892,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 raise ValueError(f"No step state found for request {request_id}")
             per_req_data.append(extra)
 
-        is_it2i = ["img_cond" in data["caches"] for data in per_req_data]
+        is_it2i = [IMG_COND in data["caches"] for data in per_req_data]
 
         image_embeds_list = []
         indexes_list = []
@@ -1887,7 +1906,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
             image_embeds_list,
             indexes_list,
             per_req_data,
-            kv_key="cond",
+            kv_key=COND,
         )
 
         # Determine which requests need uncond and/or img_cond forwards
@@ -1901,7 +1920,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
                 use_cfg = (t > p.cfg_interval[0] and t < p.cfg_interval[1]) or p.cfg_interval[0] == 0
                 needs_cfg = not (p.cfg_scale == 1 and p.img_cfg_scale == 1)
                 if use_cfg and needs_cfg:
-                    if "img_cond" in data["caches"]:
+                    if IMG_COND in data["caches"]:
                         needs_img_cond_indices.append(i)
                     if p.img_cfg_scale != 1:
                         needs_uncond_indices.append(i)
@@ -1913,13 +1932,13 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         uncond_out: dict[int, torch.Tensor] = {}
         if needs_uncond_indices:
             uncond_embeds = [image_embeds_list[i] for i in needs_uncond_indices]
-            uncond_indexes_list = [per_req_data[i]["caches"]["idx_uncond"] for i in needs_uncond_indices]
+            uncond_indexes_list = [per_req_data[i]["caches"][IDX_UNCOND] for i in needs_uncond_indices]
             uncond_data = [per_req_data[i] for i in needs_uncond_indices]
             uncond_results = self._batched_predict_v(
                 uncond_embeds,
                 uncond_indexes_list,
                 uncond_data,
-                kv_key="uncond",
+                kv_key=UNCOND,
             )
             for j, i in enumerate(needs_uncond_indices):
                 uncond_out[i] = uncond_results[j]
@@ -1928,57 +1947,29 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
         img_cond_out: dict[int, torch.Tensor] = {}
         if needs_img_cond_indices:
             img_cond_embeds = [image_embeds_list[i] for i in needs_img_cond_indices]
-            img_cond_indexes_list = [per_req_data[i]["caches"]["idx_img_cond"] for i in needs_img_cond_indices]
+            img_cond_indexes_list = [per_req_data[i]["caches"][IDX_IMG_COND] for i in needs_img_cond_indices]
             img_cond_data = [per_req_data[i] for i in needs_img_cond_indices]
             img_cond_results = self._batched_predict_v(
                 img_cond_embeds,
                 img_cond_indexes_list,
                 img_cond_data,
-                kv_key="img_cond",
+                kv_key=IMG_COND,
             )
             for j, i in enumerate(needs_img_cond_indices):
                 img_cond_out[i] = img_cond_results[j]
 
-        # Per-request CFG combination
+        # Per-request CFG combination (shared logic with non-batched path)
         batch_v_preds = []
         for i, data in enumerate(per_req_data):
-            out_cond = cond_out[i]
             p = data["p"]
             step_index = data.get("_current_step_index", 0)
-
-            if i in img_cond_out:
-                # IT2I dual CFG
-                out_img_cond = img_cond_out[i]
-                if i in uncond_out:
-                    out_uncond = uncond_out[i]
-                    v_pred = (
-                        out_uncond
-                        + p.cfg_scale * (out_cond - out_img_cond)
-                        + p.img_cfg_scale * (out_img_cond - out_uncond)
-                    )
-                else:
-                    v_pred = out_img_cond + p.cfg_scale * (out_cond - out_img_cond)
-                if p.cfg_scale > 1 or p.img_cfg_scale > 1:
-                    v_pred = self._apply_cfg_norm(v_pred, out_cond, p.cfg_norm)
-            elif i in uncond_out:
-                # T2I CFG
-                out_uncond = uncond_out[i]
-                if p.cfg_norm == "cfg_zero_star":
-                    pos_flat = out_cond.view(p.batch_size, -1)
-                    neg_flat = out_uncond.view(p.batch_size, -1)
-                    alpha = _optimized_scale(pos_flat, neg_flat)
-                    alpha = alpha.view(p.batch_size, *([1] * (len(out_cond.shape) - 1))).to(pos_flat.dtype)
-                    v_pred = (
-                        out_cond * 0.0
-                        if step_index <= 0
-                        else (out_uncond * alpha + p.cfg_scale * (out_cond - out_uncond * alpha))
-                    )
-                else:
-                    v_pred = out_uncond + p.cfg_scale * (out_cond - out_uncond)
-                    v_pred = self._apply_cfg_norm(v_pred, out_cond, p.cfg_norm)
-            else:
-                v_pred = out_cond
-
+            v_pred = self._combine_cfg(
+                cond_out[i],
+                uncond_out.get(i),
+                img_cond_out.get(i),
+                p,
+                step_index,
+            )
             batch_v_preds.append(v_pred)
 
         return torch.cat(batch_v_preds, dim=0)
@@ -2031,7 +2022,7 @@ class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExe
 
         # Cleanup KV caches and step state
         caches = state.extra.get("caches", {})
-        for key in ("cond", "uncond", "img_cond"):
+        for key in (COND, UNCOND, IMG_COND):
             if key in caches and not isinstance(caches[key], dict):
                 clear_flash_kv_cache(caches[key])
         self._step_states.pop(state.request_id, None)

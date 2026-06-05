@@ -779,11 +779,6 @@ class OmniDiffusionConfig:
     # Supplementary model specific parameters
     extras: dict[str, Any] = Field(default_factory=dict)
 
-    # Fields in SamplingParamsKey to ignore when batching requests.
-    # Pipelines that handle heterogeneous batches (e.g. different resolutions)
-    # can set this to ["height", "width"] so the scheduler allows mixing.
-    heterogeneous_batch_fields: list[str] = field(default_factory=list)
-
     @property
     def is_moe(self) -> bool:
         num_experts = self.tf_model_config.get("num_experts", None)

@@ -64,6 +64,7 @@ def _keys_match_ignoring(
     return True
 
 
+
 class _BaseScheduler(SchedulerInterface):
     """Shared queue/state bookkeeping for diffusion schedulers."""
 
@@ -288,14 +289,7 @@ class _BaseScheduler(SchedulerInterface):
             return True
 
         current_key = self._current_sampling_params_key()
-        if current_key is None:
-            return False
-        if current_key == state.sampling_params_key:
-            return True
-        ignore = getattr(self.od_config, "heterogeneous_batch_fields", None)
-        if ignore:
-            return _keys_match_ignoring(current_key, state.sampling_params_key, ignore)
-        return False
+        return current_key is not None and current_key == state.sampling_params_key
 
     def _current_sampling_params_key(self) -> SamplingParamsKey | RequestBatchSamplingParamsKey | None:
         if self._running_sampling_params_key is not None or not self._running:

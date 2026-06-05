@@ -520,20 +520,17 @@ class SenseNovaU1Attention(nn.Module):
         attn_output, _ = self.o_proj_mot_gen(attn_output)
         return attn_output
 
-    def forward_gen_varlen(
+    def forward_gen_batched(
         self,
         hidden_states: torch.Tensor,
         indexes: torch.Tensor,
         prefix_kv_list: list[tuple[torch.Tensor, torch.Tensor]],
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
+        q_lens: list[int],
     ) -> torch.Tensor:
-        """Varlen generation path for batched requests with different prefix lengths."""
-        from flash_attn import flash_attn_varlen_func
-
+        """Batched generation with padded layout and 2D attention mask."""
+        B = hidden_states.shape[0]
         input_shape = hidden_states.shape[:-1]
+
         query_states, key_states, value_states = self._project_and_rope(
             hidden_states,
             indexes,
@@ -543,39 +540,33 @@ class SenseNovaU1Attention(nn.Module):
             self.q_norm_hw_mot_gen,
             self.k_norm_hw_mot_gen,
         )
-        # query_states: [1, H, total_S, D], key/value_states: [1, Hkv, total_S, D]
-        q = query_states.squeeze(0).transpose(0, 1).contiguous()  # [total_S, H, D]
-        k_cur = key_states.squeeze(0).transpose(0, 1).contiguous()  # [total_S, Hkv, D]
-        v_cur = value_states.squeeze(0).transpose(0, 1).contiguous()
+        # query_states/key_states: [B, H, max_S, D], value_states: [B, Hkv, max_S, D]
+        q = query_states.transpose(1, 2).contiguous()  # [B, max_S, H, D]
+        k_cur = key_states.transpose(1, 2).contiguous()  # [B, max_S, Hkv, D]
+        v_cur = value_states.transpose(1, 2).contiguous()
 
-        N = len(prefix_kv_list)
-        all_k = []
-        all_v = []
-        for i in range(N):
-            q_start = int(cu_seqlens_q[i])
-            q_end = int(cu_seqlens_q[i + 1])
-            prefix_k, prefix_v = prefix_kv_list[i]
-            all_k.append(prefix_k)
-            all_k.append(k_cur[q_start:q_end])
-            all_v.append(prefix_v)
-            all_v.append(v_cur[q_start:q_end])
+        prefix_lens = [pk.shape[1] for pk, _ in prefix_kv_list]
+        kv_lens = [prefix_lens[i] + q_lens[i] for i in range(B)]
+        max_kv_len = max(kv_lens)
+        device = q.device
 
-        k_packed = torch.cat(all_k, dim=0)  # [total_kv, Hkv, D]
-        v_packed = torch.cat(all_v, dim=0)
+        k_padded = torch.zeros(B, max_kv_len, self.num_kv_heads, self.head_dim, device=device, dtype=q.dtype)
+        v_padded = torch.zeros_like(k_padded)
 
-        attn_output = flash_attn_varlen_func(
-            q,
-            k_packed,
-            v_packed,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale=self.scaling,
-            causal=False,
-        )  # [total_S, H, D]
+        for i in range(B):
+            plen = prefix_lens[i]
+            qlen = q_lens[i]
+            pk, pv = prefix_kv_list[i]
+            k_padded[i, :plen] = pk.squeeze(0)
+            v_padded[i, :plen] = pv.squeeze(0)
+            k_padded[i, plen : plen + qlen] = k_cur[i, :qlen]
+            v_padded[i, plen : plen + qlen] = v_cur[i, :qlen]
 
-        attn_output = attn_output.unsqueeze(0)  # [1, total_S, H, D]
+        attention_mask = torch.zeros(B, max_kv_len, dtype=torch.bool, device=device)
+        for i in range(B):
+            attention_mask[i, : kv_lens[i]] = True
+
+        attn_output = self._run_attn_bshd(q, k_padded, v_padded, attention_mask)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output, _ = self.o_proj_mot_gen(attn_output)
         return attn_output
@@ -665,21 +656,11 @@ class SenseNovaU1DecoderLayer(nn.Module):
         hidden_states = self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(hidden_states))
         return residual + hidden_states
 
-    def _forward_gen_varlen(
-        self, hidden_states, indexes, prefix_kv_list, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k
-    ):
-        """Varlen generation forward for one decoder layer."""
+    def _forward_gen_batched(self, hidden_states, indexes, prefix_kv_list, q_lens):
+        """Batched generation forward for one decoder layer."""
         residual = hidden_states
         hidden_states = self.input_layernorm_mot_gen(hidden_states)
-        hidden_states = self.self_attn.forward_gen_varlen(
-            hidden_states,
-            indexes,
-            prefix_kv_list,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-        )
+        hidden_states = self.self_attn.forward_gen_batched(hidden_states, indexes, prefix_kv_list, q_lens)
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(hidden_states))
@@ -802,36 +783,25 @@ class SenseNovaU1Model(nn.Module):
             past_key_values=past_key_values if use_cache else None,
         )
 
-    def forward_varlen(
+    def forward_gen_batched(
         self,
         inputs_embeds: torch.Tensor,
         indexes: torch.Tensor,
         past_key_values_list: list[DynamicCache],
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
+        q_lens: list[int],
     ) -> SenseNovaU1ModelOutput:
-        """Varlen generation forward for batched requests."""
+        """Batched generation forward with padded layout and attention mask."""
         hidden_states = inputs_embeds
         for layer_idx, layer in enumerate(self.layers):
             prefix_kv_list = []
             for pkv in past_key_values_list:
                 cache_layer = pkv.layers[layer_idx]
                 prefix_len = cache_layer.flash_prefix_len
-                prefix_k = cache_layer.flash_k_cache[0, :prefix_len]
-                prefix_v = cache_layer.flash_v_cache[0, :prefix_len]
+                prefix_k = cache_layer.flash_k_cache[:, :prefix_len]
+                prefix_v = cache_layer.flash_v_cache[:, :prefix_len]
                 prefix_kv_list.append((prefix_k, prefix_v))
 
-            hidden_states = layer._forward_gen_varlen(
-                hidden_states,
-                indexes,
-                prefix_kv_list,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-            )
+            hidden_states = layer._forward_gen_batched(hidden_states, indexes, prefix_kv_list, q_lens)
 
         hidden_states = self.norm_mot_gen(hidden_states)
         return SenseNovaU1ModelOutput(last_hidden_state=hidden_states)
@@ -894,26 +864,9 @@ class SenseNovaU1ForCausalLM(nn.Module):
             hidden_states=outputs.last_hidden_state,
         )
 
-    def forward_varlen(
-        self,
-        inputs_embeds,
-        indexes,
-        past_key_values_list,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-    ):
-        """Varlen generation forward — delegates to model.forward_varlen."""
-        outputs = self.model.forward_varlen(
-            inputs_embeds,
-            indexes,
-            past_key_values_list,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-        )
+    def forward_gen_batched(self, inputs_embeds, indexes, past_key_values_list, q_lens):
+        """Batched generation forward — delegates to model.forward_gen_batched."""
+        outputs = self.model.forward_gen_batched(inputs_embeds, indexes, past_key_values_list, q_lens)
         return SenseNovaU1CausalLMOutput(
             hidden_states=outputs.last_hidden_state,
         )
