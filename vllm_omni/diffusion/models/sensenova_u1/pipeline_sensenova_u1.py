@@ -521,7 +521,9 @@ class SenseNovaU1DenoisingAdapter(nn.Module):
         return self.language_model(*args, **kwargs)
 
 
-class SenseNovaU1Pipeline(nn.Module, SupportsComponentDiscovery, SupportsStepExecution, DiffusionPipelineProfilerMixin, CFGParallelMixin):
+class SenseNovaU1Pipeline(
+    nn.Module, SupportsComponentDiscovery, SupportsStepExecution, DiffusionPipelineProfilerMixin, CFGParallelMixin
+):
     """SenseNova-U1 text-to-image and image-to-image pipeline for vllm-omni.
 
     Builds the full model graph internally:
