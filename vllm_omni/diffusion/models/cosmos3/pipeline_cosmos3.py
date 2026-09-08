@@ -1244,6 +1244,41 @@ class Cosmos3OmniDiffusersPipeline(
     # Step-wise execution (SupportsStepExecution protocol)
     # -----------------------------------------------------------------------
 
+    def _resolve_action_video_input(
+        self,
+        sp: OmniDiffusionSamplingParams,
+        action_video_tensor: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, int | None, int | None]:
+        """Resolve the action conditioning video, shared by ``forward()`` and step execution.
+
+        Falls back to ``sampling_params.extra_args["action_video"]`` when no
+        preprocessed video is supplied, normalizes the shape to
+        ``[1, 3, T, H, W]``, and derives height/width defaults from the tensor
+        when ``sp.height`` / ``sp.width`` are unset.
+
+        Returns ``(tensor, height, width)``; height/width are None when not
+        derivable (i.e. ``sp`` already set them or no tensor is present).
+        """
+        if action_video_tensor is None:
+            extra_action_video = self._get_sp_param(sp, "action_video", None)
+            if isinstance(extra_action_video, torch.Tensor):
+                action_video_tensor = extra_action_video
+        derived_height = None
+        derived_width = None
+        if action_video_tensor is not None:
+            if action_video_tensor.ndim == 4:
+                action_video_tensor = action_video_tensor.unsqueeze(0)
+            if action_video_tensor.ndim != 5:
+                raise ValueError(
+                    "Cosmos3 action video tensor must have shape [1, 3, T, H, W] "
+                    f"or [3, T, H, W], got {tuple(action_video_tensor.shape)}."
+                )
+            if sp.height is None:
+                derived_height = int(action_video_tensor.shape[-2])
+            if sp.width is None:
+                derived_width = int(action_video_tensor.shape[-1])
+        return action_video_tensor, derived_height, derived_width
+
     def _parse_request_from_state(self, state: StepRequestState) -> SimpleNamespace:
         """Build the parameter namespace from StepRequestState fields."""
         first_prompt = state.prompt
@@ -1273,6 +1308,15 @@ class Cosmos3OmniDiffusersPipeline(
         sound_enabled = self._is_sound_request(first_prompt, sp)
         action_mode = self._get_action_mode(first_prompt, sp)
         action_enabled = action_mode is not None
+
+        # Share forward()'s extra_args["action_video"] fallback (and its
+        # height/width defaults) so requests that condition through
+        # sampling_params.extra_args work identically in step mode.
+        action_video_height = None
+        action_video_width = None
+        if action_enabled:
+            video_tensor, action_video_height, action_video_width = self._resolve_action_video_input(sp, video_tensor)
+
         is_v2v = video_tensor is not None and not is_t2i and not action_enabled
 
         # Resolve defaults
@@ -1287,10 +1331,16 @@ class Cosmos3OmniDiffusersPipeline(
             default_flow_shift = COSMOS3_T2I_DEFAULT_FLOW_SHIFT
             default_guidance_interval: tuple[float, float] | None = COSMOS3_T2I_DEFAULT_GUIDANCE_INTERVAL
         else:
-            height = sp.height or (
-                COSMOS3_EDGE_T2V_DEFAULT_HEIGHT if self.is_edge_model else COSMOS3_T2V_DEFAULT_HEIGHT
+            height = (
+                sp.height
+                or action_video_height
+                or (COSMOS3_EDGE_T2V_DEFAULT_HEIGHT if self.is_edge_model else COSMOS3_T2V_DEFAULT_HEIGHT)
             )
-            width = sp.width or (COSMOS3_EDGE_T2V_DEFAULT_WIDTH if self.is_edge_model else COSMOS3_T2V_DEFAULT_WIDTH)
+            width = (
+                sp.width
+                or action_video_width
+                or (COSMOS3_EDGE_T2V_DEFAULT_WIDTH if self.is_edge_model else COSMOS3_T2V_DEFAULT_WIDTH)
+            )
             default_guidance_scale = (
                 COSMOS3_EDGE_T2V_DEFAULT_GUIDANCE_SCALE if self.is_edge_model else COSMOS3_T2V_DEFAULT_GUIDANCE_SCALE
             )
@@ -1485,12 +1535,15 @@ class Cosmos3OmniDiffusersPipeline(
                 p.video_tensor = p.video_tensor[:, :, : p.num_frames]
 
             if p.action_mode == ACTION_MODE_INVERSE_DYNAMICS and p.video_tensor is None:
-                raise ValueError("Cosmos3 inverse_dynamics action mode requires multi_modal_data['video'].")
+                raise ValueError(
+                    "Cosmos3 inverse_dynamics action mode requires multi_modal_data['video'] "
+                    "or extra_args['action_video']."
+                )
             if p.action_mode in {ACTION_MODE_POLICY, ACTION_MODE_FORWARD_DYNAMICS} and p.image_tensor is None:
                 if p.video_tensor is None:
                     raise ValueError(
-                        f"Cosmos3 action_mode={p.action_mode!r} requires multi_modal_data['image'] "
-                        "or multi_modal_data['video']."
+                        f"Cosmos3 action_mode={p.action_mode!r} requires multi_modal_data['image'], "
+                        "multi_modal_data['video'], or extra_args['action_video']."
                     )
                 p.image_tensor = p.video_tensor[:, :, 0]
 
@@ -1573,9 +1626,14 @@ class Cosmos3OmniDiffusersPipeline(
         req_scheduler = copy.deepcopy(self.scheduler)
         timesteps = req_scheduler.timesteps
 
-        # Initialize UND K/V session state
+        # Initialize UND K/V session state. Register kv_state/session_id in
+        # state.extra immediately after creating the session: the runner's
+        # terminal cleanup hook (release_step_state) reads them from extra, so
+        # anything raising below must still be able to drop the session.
         session_id = state.request_id
         kv_state = self._new_cosmos3_state(session_id)
+        state.extra["kv_state"] = kv_state
+        state.extra["session_id"] = session_id
         self._kv_reset_und(kv_state)
 
         # Populate state fields consumed by InputBatch / step_scheduler
@@ -1607,8 +1665,6 @@ class Cosmos3OmniDiffusersPipeline(
         state.extra["target_audio_samples"] = target_audio_samples
         state.extra["sound_sample_rate"] = sound_sample_rate
         state.extra["video_shape"] = video_shape
-        state.extra["kv_state"] = kv_state
-        state.extra["session_id"] = session_id
         state.extra["_current_latents"] = latents
         state.extra["_cond_cache"] = (None, None)
         state.extra["_uncond_cache"] = (None, None)
@@ -1971,19 +2027,38 @@ class Cosmos3OmniDiffusersPipeline(
         else:
             result = {"video": video}
 
-        # Cleanup UND K/V session and release per-request tensors held in
-        # state.extra so the runner can drop the state without leaks. (If a
-        # request is cancelled before post_decode, the SessionStateManager's
-        # count-based eviction reclaims the K/V session eventually.)
+        # Release per-request GPU resources on the success path. Failure and
+        # abort paths are covered by release_step_state(), which the runner
+        # invokes on every terminal path via the SupportsStepRequestCleanup
+        # protocol.
+        self._release_step_resources(state.extra)
+
+        return DiffusionOutput(output=result)
+
+    def release_step_state(self, state: StepRequestState, **kwargs: Any) -> None:
+        """Drop the UND K/V session and per-request tensors on any terminal path.
+
+        Called by the runner when a step request finishes, fails, or is
+        aborted/interrupted, so the SessionStateManager never retains GPU K/V
+        for a dead request (previously reclaimed only by count-based
+        eviction). Idempotent: a no-op once the resources are released.
+        """
+        self._release_step_resources(state.extra)
+
+    def _release_step_resources(self, extra: dict[str, Any]) -> None:
+        """Release per-request resources tracked in ``state.extra`` (idempotent)."""
+        if not extra:
+            return
         kv_state = extra.get("kv_state")
         session_id = extra.get("session_id")
         if kv_state is not None and session_id is not None:
             self._memory_manager.drop_session(session_id)
-        else:
-            self.transformer.reset_cache()
-        state.extra.clear()
-
-        return DiffusionOutput(output=result)
+        # Always clear the transformer's references too: the session tensors
+        # were aliased onto cached_kv/cached_freqs_gen by _kv_load_und, and
+        # dropping the session alone leaves them pinned on device until the
+        # next request's _kv_reset_und.
+        self.transformer.reset_cache()
+        extra.clear()
 
     # Checkpoint adapters use this hook before model-specific weight loading.
     remap_checkpoint_key = _remap_ckpt_key
@@ -4533,22 +4608,15 @@ class Cosmos3OmniDiffusersPipeline(
         )
         use_system_prompt = bool(self._get_sp_param(sp, "use_system_prompt", is_v2v))
 
-        if action_enabled and action_video_tensor is None:
-            extra_action_video = self._get_sp_param(sp, "action_video", None)
-            if isinstance(extra_action_video, torch.Tensor):
-                action_video_tensor = extra_action_video
-        if action_enabled and isinstance(action_video_tensor, torch.Tensor):
-            if action_video_tensor.ndim == 4:
-                action_video_tensor = action_video_tensor.unsqueeze(0)
-            if action_video_tensor.ndim != 5:
-                raise ValueError(
-                    "Cosmos3 extra_args['action_video'] must have shape [1, 3, T, H, W] "
-                    f"or [3, T, H, W], got {tuple(action_video_tensor.shape)}."
-                )
-            if sp.height is None:
-                height = int(action_video_tensor.shape[-2])
-            if sp.width is None:
-                width = int(action_video_tensor.shape[-1])
+        # Shared action-video resolution (extra_args fallback + shape
+        # normalization + height/width defaults), reused by step execution.
+        action_video_tensor, action_video_height, action_video_width = self._resolve_action_video_input(
+            sp, action_video_tensor if action_enabled else None
+        )
+        if action_video_height is not None:
+            height = action_video_height
+        if action_video_width is not None:
+            width = action_video_width
 
         self._guidance_scale = guidance_scale
         self._num_timesteps = num_inference_steps
