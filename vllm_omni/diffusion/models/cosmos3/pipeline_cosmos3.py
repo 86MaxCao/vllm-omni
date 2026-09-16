@@ -1715,122 +1715,31 @@ class Cosmos3OmniDiffusersPipeline(
         latents = extra["_current_latents"]
         timesteps = extra["timesteps"] if extra.get("timesteps") is not None else self.scheduler.timesteps
 
-        t = timesteps[step_index]
-        timestep = t.unsqueeze(0)
+        # Per-request scheduler (deepcopy'd in prepare_encode): FlowUniPC keeps
+        # multistep history / step index as mutable instance state.
+        req_scheduler = extra.get("req_scheduler") or self.scheduler
 
-        cond_ids = extra["cond_ids"]
-        cond_mask = extra["cond_mask"]
-        uncond_ids = extra["uncond_ids"]
-        uncond_mask = extra["uncond_mask"]
-        shared_kwargs = extra["shared_kwargs"]
-        action_latents = extra["action_latents"]
-        sound_latents = extra["sound_latents"]
-        kv_state = extra["kv_state"]
-        guidance_scale = p.guidance_scale
-        guidance_interval = p.guidance_interval
-
-        do_cfg = guidance_scale > 1.0
-        cfg_parallel = self._cfg_parallel_active() and do_cfg
-
-        def _cfg_active_at(t_val: torch.Tensor) -> bool:
-            if guidance_interval is None:
-                return True
-            t_scalar = float(t_val.item()) if torch.is_tensor(t_val) else float(t_val)
-            lo, hi = guidance_interval
-            return lo <= t_scalar <= hi
-
-        if cfg_parallel:
-            # Each CFG-parallel rank runs exactly one branch.
-            cfg_rank_is_negative = get_classifier_free_guidance_rank() != 0
-            step_scale = guidance_scale if _cfg_active_at(t) else 1.0
-            self._kv_load_und(kv_state, is_negative=cfg_rank_is_negative)
-            noise_pred = self.predict_noise_maybe_with_cfg(
-                do_true_cfg=True,
-                true_cfg_scale=step_scale,
-                positive_kwargs=dict(
-                    hidden_states=latents,
-                    timestep=timestep,
-                    text_ids=cond_ids,
-                    text_mask=cond_mask,
-                    action_latents=action_latents,
-                    sound_latents=sound_latents,
-                    **shared_kwargs,
-                ),
-                negative_kwargs=dict(
-                    hidden_states=latents,
-                    timestep=timestep,
-                    text_ids=uncond_ids,
-                    text_mask=uncond_mask,
-                    action_latents=action_latents,
-                    sound_latents=sound_latents,
-                    **shared_kwargs,
-                ),
-                cfg_normalize=False,
-            )
-            if kv_state is not None:
-                self._kv_capture_und(kv_state, is_negative=cfg_rank_is_negative)
-        elif do_cfg:
-            cond_cache = extra["_cond_cache"]
-            uncond_cache = extra["_uncond_cache"]
-            keep_uncond_for_cache = self._cache_requires_paired_cfg()
-
-            cfg_active = _cfg_active_at(t)
-
-            # Cond forward
-            if not self._kv_load_und(kv_state, is_negative=False):
-                self.transformer.cached_kv, self.transformer.cached_freqs_gen = cond_cache
-            noise_cond = self.transformer(
-                hidden_states=latents,
-                timestep=timestep,
-                text_ids=cond_ids,
-                text_mask=cond_mask,
-                action_latents=action_latents,
-                sound_latents=sound_latents,
-                **shared_kwargs,
-            )
-            if kv_state is not None:
-                self._kv_capture_und(kv_state, is_negative=False)
-            elif cond_cache[0] is None:
-                extra["_cond_cache"] = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
-
-            # Uncond forward (if CFG active or cache-dit needs paired CFG)
-            if cfg_active or keep_uncond_for_cache:
-                if not self._kv_load_und(kv_state, is_negative=True):
-                    self.transformer.cached_kv, self.transformer.cached_freqs_gen = uncond_cache
-                noise_uncond = self.transformer(
-                    hidden_states=latents,
-                    timestep=timestep,
-                    text_ids=uncond_ids,
-                    text_mask=uncond_mask,
-                    action_latents=action_latents,
-                    sound_latents=sound_latents,
-                    **shared_kwargs,
-                )
-                if kv_state is not None:
-                    self._kv_capture_und(kv_state, is_negative=True)
-                elif uncond_cache[0] is None:
-                    extra["_uncond_cache"] = (
-                        self.transformer.cached_kv,
-                        self.transformer.cached_freqs_gen,
-                    )
-                step_scale = guidance_scale if cfg_active else 1.0
-                noise_pred = self.combine_cfg_noise(noise_cond, noise_uncond, step_scale, cfg_normalize=False)
-            else:
-                noise_pred = noise_cond
-        else:
-            # No CFG: single cond forward
-            self._kv_load_und(kv_state, is_negative=False)
-            noise_pred = self.transformer(
-                hidden_states=latents,
-                timestep=timestep,
-                text_ids=cond_ids,
-                text_mask=cond_mask,
-                action_latents=action_latents,
-                sound_latents=sound_latents,
-                **shared_kwargs,
-            )
-            if kv_state is not None:
-                self._kv_capture_und(kv_state, is_negative=False)
+        noise_pred, cond_cache, uncond_cache = self._predict_noise_one_step(
+            t=timesteps[step_index],
+            timesteps=timesteps,
+            step_index=step_index,
+            scheduler=req_scheduler,
+            latents=latents,
+            action_latents=extra["action_latents"],
+            sound_latents=extra["sound_latents"],
+            cond_ids=extra["cond_ids"],
+            cond_mask=extra["cond_mask"],
+            uncond_ids=extra["uncond_ids"],
+            uncond_mask=extra["uncond_mask"],
+            shared_kwargs=extra["shared_kwargs"],
+            kv_state=extra["kv_state"],
+            guidance_scale=p.guidance_scale,
+            guidance_interval=p.guidance_interval,
+            cond_cache=extra["_cond_cache"],
+            uncond_cache=extra["_uncond_cache"],
+        )
+        extra["_cond_cache"] = cond_cache
+        extra["_uncond_cache"] = uncond_cache
 
         # The runner slices ``noise_pred`` per request along the batch dimension,
         # which cannot carry per-modality tuples. Flatten multimodal (video/
@@ -2062,6 +1971,11 @@ class Cosmos3OmniDiffusersPipeline(
         # dropping the session alone leaves them pinned on device until the
         # next request's _kv_reset_und.
         self.transformer.reset_cache()
+        # Per-step metadata / mixed-precision set inside _predict_noise_one_step;
+        # diffuse() clears these in its finally block, so the step path clears
+        # them on every terminal path here.
+        self._clear_denoise_step_metadata()
+        self._reset_mixed_precision()
         extra.clear()
 
     # Checkpoint adapters use this hook before model-specific weight loading.
@@ -3539,6 +3453,164 @@ class Cosmos3OmniDiffusersPipeline(
         if state is not None:
             state.reset()
 
+    @staticmethod
+    def _cfg_active_at(t: torch.Tensor | float, guidance_interval: tuple[float, float] | None) -> bool:
+        """Whether CFG is active at timestep ``t``.
+
+        ``guidance_interval`` restricts CFG to timesteps inside the closed
+        interval ``[lo, hi]``, compared against the raw scheduler timestep
+        value (works for both the [0, 1000] discrete scale and normalized
+        flow-matching scales). Outside the interval the cond/uncond delta is
+        zeroed so all ranks continue to execute identical control flow
+        (CFG-Parallel safe).
+        """
+        if guidance_interval is None:
+            return True
+        t_scalar = float(t.item()) if torch.is_tensor(t) else float(t)
+        lo, hi = guidance_interval
+        return lo <= t_scalar <= hi
+
+    def _predict_noise_one_step(
+        self,
+        *,
+        t: torch.Tensor,
+        timesteps: torch.Tensor,
+        step_index: int,
+        scheduler: Any,
+        latents: torch.Tensor,
+        action_latents: torch.Tensor | None,
+        sound_latents: torch.Tensor | None,
+        cond_ids: torch.Tensor,
+        cond_mask: torch.Tensor,
+        uncond_ids: torch.Tensor,
+        uncond_mask: torch.Tensor,
+        shared_kwargs: dict[str, Any],
+        kv_state: Cosmos3StateAdapter | None,
+        guidance_scale: float,
+        guidance_interval: tuple[float, float] | None,
+        cond_cache: tuple,
+        uncond_cache: tuple,
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor, ...], tuple, tuple]:
+        """One CFG-aware noise prediction shared by ``diffuse()`` and step execution.
+
+        Dispatches over the three CFG modes: CFG-Parallel (one branch per rank),
+        sequential two-branch CFG with per-branch UND K/V caching, and single
+        branch no-CFG. Returns ``(noise_pred, cond_cache, uncond_cache)``; the
+        bespoke caches are passed in and returned so each caller keeps its own
+        persistence (loop-local for ``diffuse``, ``StepRequestState.extra`` for
+        step execution).
+        """
+        self._set_denoise_step_metadata(step_index, timesteps, scheduler)
+        self._set_mixed_precision_step(step_index, len(timesteps))
+        timestep = t.unsqueeze(0)
+
+        do_cfg = guidance_scale > 1.0
+        cfg_parallel = self._cfg_parallel_active() and do_cfg
+
+        if cfg_parallel:
+            # Each CFG-parallel rank runs exactly one branch (rank 0 -> cond,
+            # else uncond), so session keying loads/stores only this rank's branch.
+            cfg_rank_is_negative = get_classifier_free_guidance_rank() != 0
+            # Outside the interval, scale=1 makes the combined output equal
+            # the cond branch. Every rank remains on the same iteration and
+            # collective schedule.
+            step_scale = guidance_scale if self._cfg_active_at(t, guidance_interval) else 1.0
+            self._kv_load_und(kv_state, is_negative=cfg_rank_is_negative)
+            noise_pred = self.predict_noise_maybe_with_cfg(
+                do_true_cfg=True,
+                true_cfg_scale=step_scale,
+                positive_kwargs=dict(
+                    _cache_context="cond",
+                    hidden_states=latents,
+                    timestep=timestep,
+                    text_ids=cond_ids,
+                    text_mask=cond_mask,
+                    action_latents=action_latents,
+                    sound_latents=sound_latents,
+                    **shared_kwargs,
+                ),
+                negative_kwargs=dict(
+                    _cache_context="uncond",
+                    hidden_states=latents,
+                    timestep=timestep,
+                    text_ids=uncond_ids,
+                    text_mask=uncond_mask,
+                    action_latents=action_latents,
+                    sound_latents=sound_latents,
+                    **shared_kwargs,
+                ),
+                cfg_normalize=False,
+            )
+            if kv_state is not None:
+                self._kv_capture_und(kv_state, is_negative=cfg_rank_is_negative)
+            return noise_pred, cond_cache, uncond_cache
+
+        if do_cfg:
+            keep_uncond_for_cache = self._cache_requires_paired_cfg()
+            cfg_active = self._cfg_active_at(t, guidance_interval)
+
+            # Cond forward
+            if not self._kv_load_und(kv_state, is_negative=False):
+                self.transformer.cached_kv, self.transformer.cached_freqs_gen = cond_cache
+            noise_cond = self.predict_noise(
+                _cache_context="cond",
+                hidden_states=latents,
+                timestep=timestep,
+                text_ids=cond_ids,
+                text_mask=cond_mask,
+                action_latents=action_latents,
+                sound_latents=sound_latents,
+                **shared_kwargs,
+            )
+            if kv_state is not None:
+                self._kv_capture_und(kv_state, is_negative=False)
+            elif cond_cache[0] is None:
+                cond_cache = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
+
+            # Uncond forward (if CFG active or cache-dit needs paired CFG)
+            if cfg_active or keep_uncond_for_cache:
+                if not self._kv_load_und(kv_state, is_negative=True):
+                    self.transformer.cached_kv, self.transformer.cached_freqs_gen = uncond_cache
+                noise_uncond = self.predict_noise(
+                    _cache_context="uncond",
+                    hidden_states=latents,
+                    timestep=timestep,
+                    text_ids=uncond_ids,
+                    text_mask=uncond_mask,
+                    action_latents=action_latents,
+                    sound_latents=sound_latents,
+                    **shared_kwargs,
+                )
+                if kv_state is not None:
+                    self._kv_capture_und(kv_state, is_negative=True)
+                elif uncond_cache[0] is None:
+                    uncond_cache = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
+                # Outside the interval, scale=1.0 makes the combined result
+                # equal to noise_cond; the uncond pass is computed only to
+                # preserve cache-dit's cond/uncond parity.
+                step_scale = guidance_scale if cfg_active else 1.0
+                noise_pred = self.combine_cfg_noise(noise_cond, noise_uncond, step_scale, cfg_normalize=False)
+            else:
+                noise_pred = noise_cond
+            return noise_pred, cond_cache, uncond_cache
+
+        # No CFG: a single cond branch per step. Bespoke (state None) keeps
+        # using the transformer-instance cache exactly as before.
+        self._kv_load_und(kv_state, is_negative=False)
+        noise_pred = self.predict_noise(
+            _cache_context="cond",
+            hidden_states=latents,
+            timestep=timestep,
+            text_ids=cond_ids,
+            text_mask=cond_mask,
+            action_latents=action_latents,
+            sound_latents=sound_latents,
+            **shared_kwargs,
+        )
+        if kv_state is not None:
+            self._kv_capture_und(kv_state, is_negative=False)
+        return noise_pred, cond_cache, uncond_cache
+
     # -- Denoising loop (shared by T2V and I2V) -----------------------------
 
     def diffuse(
@@ -3592,19 +3664,10 @@ class Cosmos3OmniDiffusersPipeline(
         Outside the interval the cond/uncond delta is zeroed so all ranks
         continue to execute identical control flow (CFG-Parallel safe).
         """
-        do_cfg = guidance_scale > 1.0
-        cfg_parallel = self._cfg_parallel_active() and do_cfg
         step_scheduler = scheduler if scheduler is not None else self.scheduler
         # Session-keyed UND K/V (RFC #4480); None => bespoke transformer-instance cache.
         kv_state = self._new_cosmos3_state(session_id)
         self._kv_reset_und(kv_state)
-
-        def _cfg_active_at(t: torch.Tensor) -> bool:
-            if guidance_interval is None:
-                return True
-            t_scalar = float(t.item()) if torch.is_tensor(t) else float(t)
-            lo, hi = guidance_interval
-            return lo <= t_scalar <= hi
 
         # Joint scheduler step over multiple modalities. Safe for flow-matching schedulers
         # because the update is linear per element; revisit this if Cosmos3 adopts a
@@ -3734,129 +3797,32 @@ class Cosmos3OmniDiffusersPipeline(
                 sound_latents = step_out[idx]
 
         try:
-            if cfg_parallel:
-                # Each CFG-parallel rank runs exactly one branch (rank 0 -> cond,
-                # else uncond), so session keying loads/stores only this rank's branch.
-                cfg_rank_is_negative = get_classifier_free_guidance_rank() != 0
-                for step_index, t in enumerate(self.progress_bar(timesteps)):
-                    self._set_denoise_step_metadata(step_index, timesteps, step_scheduler)
-                    self._set_mixed_precision_step(step_index, len(timesteps))
-                    timestep = t.unsqueeze(0)
-                    # Outside the interval, scale=1 makes the combined output equal
-                    # the cond branch. Every rank remains on the same iteration and
-                    # collective schedule.
-                    step_scale = guidance_scale if _cfg_active_at(t) else 1.0
-                    self._kv_load_und(kv_state, is_negative=cfg_rank_is_negative)
-                    noise_pred = self.predict_noise_maybe_with_cfg(
-                        do_true_cfg=True,
-                        true_cfg_scale=step_scale,
-                        positive_kwargs=dict(
-                            _cache_context="cond",
-                            hidden_states=latents,
-                            timestep=timestep,
-                            text_ids=cond_ids,
-                            text_mask=cond_mask,
-                            action_latents=action_latents,
-                            sound_latents=sound_latents,
-                            **shared_kwargs,
-                        ),
-                        negative_kwargs=dict(
-                            _cache_context="uncond",
-                            hidden_states=latents,
-                            timestep=timestep,
-                            text_ids=uncond_ids,
-                            text_mask=uncond_mask,
-                            action_latents=action_latents,
-                            sound_latents=sound_latents,
-                            **shared_kwargs,
-                        ),
-                        cfg_normalize=False,
-                    )
-                    if kv_state is not None:
-                        self._kv_capture_und(kv_state, is_negative=cfg_rank_is_negative)
-                    _assign_step_out(_step(noise_pred, t, latents, action_latents, sound_latents))
-
-            elif do_cfg:
-                cond_cache: tuple = (None, None)
-                uncond_cache: tuple = (None, None)
-                keep_uncond_for_cache = self._cache_requires_paired_cfg()
-
-                for step_index, t in enumerate(self.progress_bar(timesteps)):
-                    self._set_denoise_step_metadata(step_index, timesteps, step_scheduler)
-                    self._set_mixed_precision_step(step_index, len(timesteps))
-                    timestep = t.unsqueeze(0)
-                    cfg_active = _cfg_active_at(t)
-
-                    if not self._kv_load_und(kv_state, is_negative=False):
-                        self.transformer.cached_kv, self.transformer.cached_freqs_gen = cond_cache
-                    noise_cond = self.predict_noise(
-                        _cache_context="cond",
-                        hidden_states=latents,
-                        timestep=timestep,
-                        text_ids=cond_ids,
-                        text_mask=cond_mask,
-                        action_latents=action_latents,
-                        sound_latents=sound_latents,
-                        **shared_kwargs,
-                    )
-                    if kv_state is not None:
-                        self._kv_capture_und(kv_state, is_negative=False)
-                    elif cond_cache[0] is None:
-                        cond_cache = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
-
-                    if cfg_active or keep_uncond_for_cache:
-                        if not self._kv_load_und(kv_state, is_negative=True):
-                            self.transformer.cached_kv, self.transformer.cached_freqs_gen = uncond_cache
-                        noise_uncond = self.predict_noise(
-                            _cache_context="uncond",
-                            hidden_states=latents,
-                            timestep=timestep,
-                            text_ids=uncond_ids,
-                            text_mask=uncond_mask,
-                            action_latents=action_latents,
-                            sound_latents=sound_latents,
-                            **shared_kwargs,
-                        )
-                        if kv_state is not None:
-                            self._kv_capture_und(kv_state, is_negative=True)
-                        elif uncond_cache[0] is None:
-                            uncond_cache = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
-                        # Outside the interval, scale=1.0 makes the combined result
-                        # equal to noise_cond; the uncond pass is computed only to
-                        # preserve cache-dit's cond/uncond parity.
-                        step_scale = guidance_scale if cfg_active else 1.0
-                        noise_pred = self.combine_cfg_noise(
-                            noise_cond,
-                            noise_uncond,
-                            step_scale,
-                            cfg_normalize=False,
-                        )
-                    else:
-                        noise_pred = noise_cond
-
-                    _assign_step_out(_step(noise_pred, t, latents, action_latents, sound_latents))
-
-            else:
-                # No CFG: a single cond branch per step. Bespoke (state None) keeps
-                # using the transformer-instance cache exactly as before.
-                for step_index, t in enumerate(self.progress_bar(timesteps)):
-                    self._set_denoise_step_metadata(step_index, timesteps, step_scheduler)
-                    self._set_mixed_precision_step(step_index, len(timesteps))
-                    timestep = t.unsqueeze(0)
-                    self._kv_load_und(kv_state, is_negative=False)
-                    noise_pred = self.predict_noise(
-                        _cache_context="cond",
-                        hidden_states=latents,
-                        timestep=timestep,
-                        text_ids=cond_ids,
-                        text_mask=cond_mask,
-                        action_latents=action_latents,
-                        sound_latents=sound_latents,
-                        **shared_kwargs,
-                    )
-                    if kv_state is not None:
-                        self._kv_capture_und(kv_state, is_negative=False)
-                    _assign_step_out(_step(noise_pred, t, latents, action_latents, sound_latents))
+            # Bespoke per-branch K/V caches for the sequential-CFG path (unused
+            # by the cfg-parallel and no-CFG modes). Loop-local here; step
+            # execution persists them in StepRequestState.extra instead.
+            cond_cache: tuple = (None, None)
+            uncond_cache: tuple = (None, None)
+            for step_index, t in enumerate(self.progress_bar(timesteps)):
+                noise_pred, cond_cache, uncond_cache = self._predict_noise_one_step(
+                    t=t,
+                    timesteps=timesteps,
+                    step_index=step_index,
+                    scheduler=step_scheduler,
+                    latents=latents,
+                    action_latents=action_latents,
+                    sound_latents=sound_latents,
+                    cond_ids=cond_ids,
+                    cond_mask=cond_mask,
+                    uncond_ids=uncond_ids,
+                    uncond_mask=uncond_mask,
+                    shared_kwargs=shared_kwargs,
+                    kv_state=kv_state,
+                    guidance_scale=guidance_scale,
+                    guidance_interval=guidance_interval,
+                    cond_cache=cond_cache,
+                    uncond_cache=uncond_cache,
+                )
+                _assign_step_out(_step(noise_pred, t, latents, action_latents, sound_latents))
         finally:
             self._clear_denoise_step_metadata()
             self._reset_mixed_precision()
