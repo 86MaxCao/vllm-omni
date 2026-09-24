@@ -3665,3 +3665,180 @@ def test_step_execution_accepts_extra_args_action_video_parity_with_forward(
     assert forward_call["height"] == step_call["height"] == 16
     assert forward_call["width"] == step_call["width"] == 32
     assert forward_call["num_frames"] == step_call["num_frames"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Step-execution CFG helper parity: SeaCache routing and step metadata
+# ---------------------------------------------------------------------------
+
+
+def _capture_predict_noise(pipeline: Any) -> tuple[list[str | None], list[Any]]:
+    """Record every predict_noise() call's _cache_context and output."""
+    contexts: list[str | None] = []
+    outputs: list[Any] = []
+    original = pipeline.predict_noise
+
+    def _recording(**kwargs: Any):
+        contexts.append(kwargs.pop("_cache_context", None))
+        out = original(**kwargs)
+        outputs.append(out)
+        return out
+
+    pipeline.predict_noise = _recording
+    return contexts, outputs
+
+
+def _make_t2v_step_state(request_id: str, **sp_overrides: Any) -> tuple[Any, Any]:
+    params: dict[str, Any] = dict(
+        height=16,
+        width=16,
+        num_frames=5,
+        num_inference_steps=2,
+        guidance_scale=3.0,
+        guidance_scale_provided=True,
+    )
+    params.update(sp_overrides)
+    sp = make_sampling_params(**params)
+    return sp, _make_step_state(request_id, sp, {"prompt": "a dog", "modalities": ["video"]})
+
+
+def test_step_execution_routes_cache_context_through_predict_noise(make_cosmos3_pipeline) -> None:
+    """Sequential-CFG steps must route SeaCache contexts via predict_noise().
+
+    The shared _predict_noise_one_step helper replaced the step path's direct
+    transformer() calls with predict_noise(_cache_context=...) so SeaCache's
+    context factory observes the same cond/uncond routing as diffuse().
+    """
+    pipeline = make_cosmos3_pipeline()
+    _capture_tokenize_calls(pipeline)
+    contexts, outputs = _capture_predict_noise(pipeline)
+
+    # StubScheduler with 2 steps yields timesteps [2, 1]; the interval covers t=2.
+    sp, state = _make_t2v_step_state("step-cache-ctx-1", guidance_interval=(1.5, 2.5))
+    pipeline.prepare_encode(state)
+
+    input_batch = SimpleNamespace(request_ids=[state.request_id])
+    noise_pred = pipeline.denoise_step(input_batch, states=[state])
+
+    assert contexts == ["cond", "uncond"]
+    # Inside the interval the combined prediction differs from the cond branch.
+    assert not torch.equal(noise_pred, outputs[0])
+
+
+def test_step_execution_keeps_paired_cfg_forwards_outside_guidance_interval(make_cosmos3_pipeline) -> None:
+    """Outside the guidance interval, paired forwards depend on cache-dit parity.
+
+    With _cache_dit_requires_paired_cfg the uncond pass still runs (to keep
+    cache-dit's cond/uncond forward parity) and scale=1.0 makes the combined
+    result equal the cond branch; without the pairing requirement the uncond
+    pass is skipped entirely.
+    """
+    pipeline = make_cosmos3_pipeline()
+    _capture_tokenize_calls(pipeline)
+
+    # Paired: interval excludes t=2, cache-dit requires cond/uncond parity.
+    pipeline._cache_dit_requires_paired_cfg = True
+    contexts, outputs = _capture_predict_noise(pipeline)
+    sp, state = _make_t2v_step_state("step-paired-cfg-1", guidance_interval=(2.5, 3.0))
+    pipeline.prepare_encode(state)
+
+    input_batch = SimpleNamespace(request_ids=[state.request_id])
+    noise_pred = pipeline.denoise_step(input_batch, states=[state])
+
+    assert contexts == ["cond", "uncond"]  # paired even though CFG is inactive
+    # scale=1.0: combined == cond branch.
+    assert torch.equal(noise_pred, outputs[0])
+    assert not torch.equal(outputs[0], outputs[1])
+
+    # Unpaired: same out-of-interval request, no cache-dit parity requirement.
+    pipeline._cache_dit_requires_paired_cfg = False
+    contexts, outputs = _capture_predict_noise(pipeline)
+    sp, state = _make_t2v_step_state("step-paired-cfg-2", guidance_interval=(2.5, 3.0))
+    pipeline.prepare_encode(state)
+    noise_pred = pipeline.denoise_step(input_batch, states=[state])
+
+    assert contexts == ["cond"]  # uncond pass skipped outside the interval
+    assert torch.equal(noise_pred, outputs[0])
+
+
+def test_step_execution_sets_step_metadata_from_request_scheduler(make_cosmos3_pipeline) -> None:
+    """Per-step metadata must come from the per-request scheduler, not the shared one."""
+    pipeline = make_cosmos3_pipeline()
+    _capture_tokenize_calls(pipeline)
+
+    mp_calls: list[Any] = []
+    pipeline.transformer.set_mixed_precision_step = lambda step, total: mp_calls.append((step, total))
+    pipeline.transformer.reset_mixed_precision = lambda: mp_calls.append("reset")
+
+    sp, state = _make_t2v_step_state("step-meta-1")
+    pipeline.prepare_encode(state)
+
+    # Swap the shared scheduler to prove the metadata reads the request's own
+    # deepcopy (FlowUniPC keeps mutable multistep state per request).
+    req_scheduler = state.extra["req_scheduler"]
+    other = StubScheduler([7, 6, 5])
+    other.sigmas = torch.tensor([0.7, 0.6, 0.5])
+    pipeline.scheduler = other
+
+    input_batch = SimpleNamespace(request_ids=[state.request_id])
+    pipeline.denoise_step(input_batch, states=[state])
+
+    assert pipeline.current_step_index == 0
+    assert pipeline.num_timesteps == 2
+    assert pipeline.current_sigma == req_scheduler.sigmas[0]
+    assert pipeline.current_sigma != other.sigmas[0]
+    assert mp_calls == [(0, 2)]  # (step_index, num_steps) for the W8A8/W4A4 policy
+
+
+def test_step_execution_resets_step_metadata_on_terminal_paths(make_cosmos3_pipeline) -> None:
+    """Success, abort, and per-request failure must all clear step metadata/mixed precision.
+
+    diffuse() clears these in its finally block; the step path's terminal
+    equivalent is _release_step_resources(), reached via post_decode() and
+    release_step_state() on every terminal path.
+    """
+    pipeline = make_cosmos3_pipeline()
+    _capture_tokenize_calls(pipeline)
+
+    mp_calls: list[Any] = []
+    pipeline.transformer.set_mixed_precision_step = lambda step, total: mp_calls.append((step, total))
+    pipeline.transformer.reset_mixed_precision = lambda: mp_calls.append("reset")
+
+    def _assert_reset() -> None:
+        assert pipeline.current_step_index is None
+        assert pipeline.current_sigma is None
+        assert mp_calls[-1] == "reset"  # mixed precision restored before decode
+
+    # Success: all steps + post_decode.
+    sp, state = _make_t2v_step_state("step-meta-ok", guidance_scale=1.0)
+    pipeline.prepare_encode(state)
+    for _ in range(state.total_steps):
+        _run_one_denoise_step(pipeline, state)
+    assert pipeline.current_step_index is not None
+    pipeline.post_decode(state)
+    _assert_reset()
+
+    # Abort: mid-denoising retirement, no post_decode.
+    sp, state = _make_t2v_step_state("step-meta-abort", guidance_scale=1.0)
+    pipeline.prepare_encode(state)
+    _run_one_denoise_step(pipeline, state)
+    assert pipeline.current_step_index is not None
+    pipeline.release_step_state(state)
+    _assert_reset()
+
+    # Failure: per-request exception during the step loop, then retirement.
+    sp, state = _make_t2v_step_state("step-meta-fail", guidance_scale=1.0)
+    pipeline.prepare_encode(state)
+
+    def _explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("step exploded")
+
+    original_step_scheduler = pipeline.step_scheduler
+    pipeline.step_scheduler = _explode
+    input_batch = SimpleNamespace(request_ids=[state.request_id])
+    noise_pred = pipeline.denoise_step(input_batch, states=[state])
+    with pytest.raises(RuntimeError, match="step exploded"):
+        pipeline.step_scheduler(state, noise_pred)
+    pipeline.step_scheduler = original_step_scheduler
+    pipeline.release_step_state(state)
+    _assert_reset()
