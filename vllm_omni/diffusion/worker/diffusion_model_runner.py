@@ -1045,7 +1045,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
             current_omni_platform.synchronize()
         finally:
             for request_id in request_ids:
-                self.state_cache.pop(request_id, None)
+                self.release_step_requests([request_id])
             self.input_batch = None
             del runner_output
             gc.collect()
@@ -1179,8 +1179,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                 if context is not None:
                     state.interaction_boundary = context
         except Exception:
-            for request_id in new_request_ids:
-                self.state_cache.pop(request_id, None)
+            self.release_step_requests(new_request_ids)
             raise
 
         return resolved, new_request_ids
@@ -1204,7 +1203,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                 # all-reduce here while every peer proceeds into it, and the
                 # peers then hang on the NCCL collective until timeout.
                 def _abort_prep_failure(per_req_exc: BaseException | None) -> None:
-                    self.state_cache.pop(state.request_id, None)
+                    self.release_step_requests([state.request_id])
                     if per_req_exc is None:
                         per_req_exc = RuntimeError(
                             f"Stepwise preparation failed on another DiT rank for {state.request_id}"
@@ -1547,7 +1546,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                             offset = offset + row_num
                         except Exception as per_req_exc:
                             offset = offset + row_num
-                            self.state_cache.pop(req.request_id, None)
+                            self.release_step_requests([req.request_id])
                             logger.error(
                                 "Stepwise per-request error for %s: %s",
                                 req.request_id,
