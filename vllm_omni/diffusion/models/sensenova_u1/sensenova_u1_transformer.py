@@ -626,7 +626,7 @@ class SenseNovaU1Attention(nn.Module):
     def forward_gen_batched(
         self,
         hidden_states: torch.Tensor,
-        indexes: torch.Tensor,
+        position_embeddings: tuple,
         prefix_kv_list: list[tuple[torch.Tensor, torch.Tensor]],
         q_lens: list[int],
     ) -> torch.Tensor:
@@ -636,7 +636,7 @@ class SenseNovaU1Attention(nn.Module):
 
         query_states, key_states, value_states = self._project_and_rope(
             hidden_states,
-            indexes,
+            position_embeddings,
             self.qkv_proj_mot_gen,
             self.q_norm_mot_gen,
             self.k_norm_mot_gen,
@@ -749,11 +749,11 @@ class SenseNovaU1DecoderLayer(nn.Module):
         hidden_states = self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(hidden_states))
         return residual + hidden_states
 
-    def _forward_gen_batched(self, hidden_states, indexes, prefix_kv_list, q_lens):
+    def _forward_gen_batched(self, hidden_states, position_embeddings, prefix_kv_list, q_lens):
         """Batched generation forward for one decoder layer."""
         residual = hidden_states
         hidden_states = self.input_layernorm_mot_gen(hidden_states)
-        hidden_states = self.self_attn.forward_gen_batched(hidden_states, indexes, prefix_kv_list, q_lens)
+        hidden_states = self.self_attn.forward_gen_batched(hidden_states, position_embeddings, prefix_kv_list, q_lens)
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(hidden_states))
@@ -903,6 +903,13 @@ class SenseNovaU1Model(nn.Module):
     ) -> SenseNovaU1ModelOutput:
         """Batched generation forward with padded layout and attention mask."""
         hidden_states = inputs_embeds
+        # indexes: [3, B, S] integer positions -> per-dimension (cos, sin) pairs,
+        # matching the contract of _project_and_rope (same as forward()).
+        position_embeddings = (
+            self.rotary_emb(hidden_states, indexes[0]),
+            self.rotary_emb_hw(hidden_states, indexes[1]),
+            self.rotary_emb_hw(hidden_states, indexes[2]),
+        )
         for layer_idx, layer in enumerate(self.layers):
             prefix_kv_list = []
             for pkv in past_key_values_list:
@@ -912,7 +919,7 @@ class SenseNovaU1Model(nn.Module):
                 prefix_v = cache_layer.flash_v_cache[:, :prefix_len]
                 prefix_kv_list.append((prefix_k, prefix_v))
 
-            hidden_states = layer._forward_gen_batched(hidden_states, indexes, prefix_kv_list, q_lens)
+            hidden_states = layer._forward_gen_batched(hidden_states, position_embeddings, prefix_kv_list, q_lens)
 
         hidden_states = self.norm_mot_gen(hidden_states)
         return SenseNovaU1ModelOutput(last_hidden_state=hidden_states)

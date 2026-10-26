@@ -259,11 +259,11 @@ class NEOVisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         llm_hidden = config.llm_hidden_size
-        if isinstance(llm_hidden, (list, tuple)):
+        if isinstance(llm_hidden, list | tuple):
             llm_hidden = llm_hidden[0]
         self.llm_embed_dim = llm_hidden
         ds_ratio = config.downsample_ratio
-        if isinstance(ds_ratio, (list, tuple)):
+        if isinstance(ds_ratio, list | tuple):
             ds_ratio = ds_ratio[0]
         self.downsample_factor = int(1 / ds_ratio)
         self.patch_size = config.patch_size
@@ -1852,7 +1852,14 @@ class SenseNovaU1Pipeline(
         z = _patchify(image_prediction, self.patch_size * ns.merge_size)
         image_embeds, _ = self._prepare_single_embeds(extra)
         is_it2i = "img_cond" in caches
-        return self._denoise(image_prediction, ns, t, z, image_embeds, caches, p, step_index, is_it2i)
+        # Same T2I/IT2I interval semantics as _run_denoising_loop.
+        t_val = float(t)
+        if is_it2i:
+            use_cfg = (t_val > p.cfg_interval[0] and t_val < p.cfg_interval[1]) or p.cfg_interval[0] == 0
+            use_cfg = use_cfg and (p.cfg_scale != 1 or p.img_cfg_scale != 1)
+        else:
+            use_cfg = p.cfg_scale > 1 and p.cfg_interval[0] <= t_val <= p.cfg_interval[1]
+        return self._denoise(image_prediction, ns, t, z, image_embeds, caches, p, step_index, is_it2i, use_cfg)
 
     def denoise_step(
         self,
@@ -2127,16 +2134,28 @@ class SenseNovaU1Pipeline(
         if think_text:
             custom["think_text"] = think_text
 
-        # Cleanup KV caches and step state
-        caches = state.extra.get("caches", {})
-        for key in ("cond", "uncond", "img_cond"):
-            if key in caches and not isinstance(caches[key], dict):
-                clear_flash_kv_cache(caches[key])
-        self._step_states.pop(state.request_id, None)
+        self.release_step_request(state)
 
         if custom:
             return DiffusionOutput(output={"image": img, **custom})
         return DiffusionOutput(output=img)
+
+    @staticmethod
+    def _clear_request_caches(caches: dict) -> None:
+        for key in ("cond", "uncond", "img_cond"):
+            if key in caches and not isinstance(caches[key], dict):
+                clear_flash_kv_cache(caches[key])
+
+    def release_step_request(self, state: DiffusionRequestState, **kwargs: Any) -> None:
+        """Release pipeline-owned per-request state on any terminal path.
+
+        Called by the runner when a step request finishes, fails, or is
+        cancelled (diffusion_model_runner.release_step_requests). Idempotent:
+        popping an absent request is a no-op and clear_flash_kv_cache only
+        deletes attributes that still exist.
+        """
+        self._step_states.pop(state.request_id, None)
+        self._clear_request_caches(state.extra.get("caches", {}))
 
     # -----------------------------------------------------------------------
     # Weight loading
