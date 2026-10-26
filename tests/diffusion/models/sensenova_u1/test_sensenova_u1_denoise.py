@@ -30,7 +30,7 @@ from vllm_omni.transformers_utils.configs.sensenova_u1 import (
     SenseNovaU1VisionConfig,
 )
 
-pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
+pytestmark = [pytest.mark.core_model, pytest.mark.diffusion]
 
 
 class _BranchProbe(nn.Module):
@@ -73,6 +73,7 @@ def _forbid_item(self, *args, **kwargs):
         ([False, True], (True, True)),
     ],
 )
+@pytest.mark.cpu
 def test_token_routing_fallback(indicators, expected):
     model = _RoutingModel()
     model(
@@ -84,6 +85,7 @@ def test_token_routing_fallback(indicators, expected):
 
 
 @pytest.mark.parametrize("teacache", [False, True])
+@pytest.mark.cpu
 def test_known_generation_type_avoids_scalar_reads(monkeypatch, teacache):
     model = _RoutingModel()
     embeds = torch.randn(1, 2, 4)
@@ -112,6 +114,7 @@ def _vision_config():
 
 @pytest.mark.parametrize("sizes", [[[4, 6]], [[4, 6], [6, 4]]])
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_vision_grid_reuse_preserves_changing_image_features(monkeypatch, sizes):
     torch.manual_seed(42)
     model = NEOVisionEmbeddings(_vision_config())
@@ -181,6 +184,7 @@ class _LoopProbe(SenseNovaU1Pipeline):
 )
 @pytest.mark.parametrize("noise_embedding", [False, True])
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_denoise_loop_preserves_cfg_boundaries_and_request_isolation(
     is_it2i, interval, scale, img_scale, noise_embedding
 ):
@@ -243,6 +247,7 @@ def _make_step_extra(pipe, p, is_it2i=False):
     ],
 )
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_single_step_denoise_passes_cfg_decision(is_it2i, interval, scale, img_scale):
     """Single-request step path must derive and pass use_cfg (PR review P1)."""
     pipe = _LoopProbe(noise_embedding=False)
@@ -271,6 +276,7 @@ def _flash_cache():
 
 
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_step_batch_drain_and_cancellation_cleanup(monkeypatch):
     """Multi-request batch -> cancel one -> drain to single -> retire all (PR review P1/P2)."""
     pipe = _LoopProbe(noise_embedding=False)
@@ -330,6 +336,7 @@ class _BatchedRoutingModel(nn.Module):
 
 
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_batched_forward_builds_rope_before_layer_calls():
     """Batched layers must receive (cos, sin) pairs, not raw indexes (PR review P1)."""
     model = _BatchedRoutingModel()
@@ -378,6 +385,7 @@ class _BatchedCausalLM(nn.Module):
 
 
 @torch.inference_mode()
+@pytest.mark.cpu
 def test_batched_denoise_step_runs_real_batch_forward_and_cleanup():
     """Two requests must share one real batched forward, then drain and clean up.
 
