@@ -141,6 +141,7 @@ class _Params:
     cfg_interval: tuple[float, float] = (0.25, 0.75)
     cfg_scale: float = 4.0
     img_cfg_scale: float = 2.0
+    cfg_norm: str = "none"
     seed: int = 42
     timestep_shift: float = 1.0
 
@@ -223,15 +224,16 @@ def test_denoise_loop_preserves_cfg_boundaries_and_request_isolation(
         assert not torch.equal(pipe.steps[0][1], pipe.steps[1][1])
 
 
-def _make_step_extra(pipe, p, is_it2i=False):
+def _make_step_extra(pipe, p, is_it2i=False, img_cond=True):
     ns = pipe._init_noise_and_schedule(p)
     caches = {"idx_cond": torch.zeros(3, ns.token_h * ns.token_w, dtype=torch.long)}
-    if is_it2i:
+    if is_it2i and img_cond:
         caches["img_cond"] = {}
     return {
         "p": p,
         "ns": ns,
         "caches": caches,
+        "is_it2i": is_it2i,
         "_image_prediction": ns.image_prediction,
         "_current_step_index": 0,
     }
@@ -263,6 +265,36 @@ def test_single_step_denoise_passes_cfg_decision(is_it2i, interval, scale, img_s
         else:
             expected = t >= interval[0] and t <= interval[1] and scale > 1
         assert pipe.steps[-1][0] == bool(expected)
+
+
+@pytest.mark.cpu
+@torch.inference_mode()
+def test_single_step_equal_scale_it2i_uses_it2i_interval():
+    """Equal-scale IT2I omits img_cond; step path must still apply IT2I CFG."""
+    pipe = _LoopProbe(noise_embedding=False)
+    p = _Params(cfg_interval=(0.25, 0.75), cfg_scale=2.0, img_cfg_scale=2.0)
+    extra = _make_step_extra(pipe, p, is_it2i=True, img_cond=False)
+    ns = extra["ns"]
+    expected = []
+    for step_i in range(p.num_steps):
+        extra["_current_step_index"] = step_i
+        pipe._step_denoise_single(ns.image_prediction, step_i, extra)
+        t_val = float(ns.timesteps[step_i])
+        # IT2I: exclusive interval (or lo == 0), plus either scale != 1.
+        expected.append((t_val > 0.25 and t_val < 0.75) and (p.cfg_scale != 1 or p.img_cfg_scale != 1))
+    assert [step[0] for step in pipe.steps] == expected
+
+
+@pytest.mark.cpu
+def test_combine_cfg_equal_scale_it2i_uses_uncond():
+    """Equal-scale IT2I (no img_cond) must combine cond/uncond, not fall to T2I."""
+    pipe = _LoopProbe(noise_embedding=False)
+    p = _Params(cfg_scale=2.0, img_cfg_scale=2.0)
+    cond = torch.ones(1, 1)
+    uncond = torch.full((1, 1), 3.0)
+    actual = pipe._combine_cfg(cond, uncond, None, p, 0, is_it2i=True)
+    expected = uncond + p.cfg_scale * (cond - uncond)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def _flash_cache():

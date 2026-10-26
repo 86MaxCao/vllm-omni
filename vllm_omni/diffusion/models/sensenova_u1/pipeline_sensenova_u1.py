@@ -1308,21 +1308,34 @@ class SenseNovaU1Pipeline(
             v_pred = v_pred * (norm_c / (norm_v + 1e-8)).clamp(0, 1.0)
         return v_pred
 
-    def _combine_cfg(self, out_cond, out_uncond, out_img_cond, p, step_index):
+    def _combine_cfg(self, out_cond, out_uncond, out_img_cond, p, step_index, is_it2i: bool):
         """Combine model predictions using classifier-free guidance.
 
         Handles T2I (two-way CFG with cfg_zero_star) and IT2I (dual CFG).
+        ``is_it2i`` is the request's stored task mode, not the presence of an
+        ``img_cond`` branch: equal-scale IT2I omits ``img_cond`` by design.
         """
-        if out_img_cond is not None:
-            if out_uncond is not None:
-                v_pred = (
-                    out_uncond + p.cfg_scale * (out_cond - out_img_cond) + p.img_cfg_scale * (out_img_cond - out_uncond)
-                )
+        if is_it2i:
+            if out_img_cond is not None:
+                if out_uncond is not None:
+                    v_pred = (
+                        out_uncond
+                        + p.cfg_scale * (out_cond - out_img_cond)
+                        + p.img_cfg_scale * (out_img_cond - out_uncond)
+                    )
+                else:
+                    v_pred = out_img_cond + p.cfg_scale * (out_cond - out_img_cond)
+            elif out_uncond is not None:
+                # cfg_scale == img_cfg_scale != 1: _build_it2i_caches omits
+                # img_cond, so combine cond/uncond like _denoise does.
+                v_pred = out_uncond + p.cfg_scale * (out_cond - out_uncond)
             else:
-                v_pred = out_img_cond + p.cfg_scale * (out_cond - out_img_cond)
-            if p.cfg_scale > 1 or p.img_cfg_scale > 1:
+                v_pred = out_cond
+            if (out_img_cond is not None or out_uncond is not None) and (p.cfg_scale > 1 or p.img_cfg_scale > 1):
                 v_pred = self._apply_cfg_norm(v_pred, out_cond, p.cfg_norm)
-        elif out_uncond is not None:
+            return v_pred
+
+        if out_uncond is not None:
             if p.cfg_norm == "cfg_zero_star":
                 pos_flat = out_cond.view(p.batch_size, -1)
                 neg_flat = out_uncond.view(p.batch_size, -1)
@@ -1829,6 +1842,7 @@ class SenseNovaU1Pipeline(
         state.extra["p"] = p
         state.extra["ns"] = ns
         state.extra["caches"] = caches
+        state.extra["is_it2i"] = input_images is not None
         state.extra["think_text"] = caches.get("think_text", "")
         state.extra["_image_prediction"] = ns.image_prediction
         state.extra["_current_step_index"] = 0
@@ -1851,7 +1865,7 @@ class SenseNovaU1Pipeline(
         t = ns.timesteps[step_index]
         z = _patchify(image_prediction, self.patch_size * ns.merge_size)
         image_embeds, _ = self._prepare_single_embeds(extra)
-        is_it2i = "img_cond" in caches
+        is_it2i = extra.get("is_it2i", False)
         # Same T2I/IT2I interval semantics as _run_denoising_loop.
         t_val = float(t)
         if is_it2i:
@@ -2006,7 +2020,7 @@ class SenseNovaU1Pipeline(
                 raise ValueError(f"No step state found for request {request_id}")
             per_req_data.append(extra)
 
-        is_it2i = ["img_cond" in data["caches"] for data in per_req_data]
+        is_it2i = [data.get("is_it2i", False) for data in per_req_data]
 
         image_embeds_list = []
         indexes_list = []
@@ -2083,6 +2097,7 @@ class SenseNovaU1Pipeline(
                 img_cond_out.get(i),
                 p,
                 step_index,
+                is_it2i[i],
             )
             batch_v_preds.append(v_pred)
 
