@@ -1498,18 +1498,7 @@ class Cosmos3OmniDiffusersPipeline(
             default_guidance_interval = None
 
         if action_enabled:
-            action_chunk_param = self._get_sp_param(sp, "action_chunk_size", None)
-            if action_chunk_param is not None:
-                action_chunk_size = int(action_chunk_param)
-                if sp.num_frames is None:
-                    num_frames = action_chunk_size + 1
-            elif sp.num_frames is None:
-                action_chunk_size = 16
-                num_frames = action_chunk_size + 1
-            else:
-                action_chunk_size = int(num_frames) - 1
-            if action_chunk_size <= 0:
-                raise ValueError(f"Cosmos3 action_chunk_size must be positive, got {action_chunk_size}.")
+            num_frames, action_chunk_size = self._resolve_action_frame_params(sp, num_frames)
             num_inference_steps = sp.num_inference_steps or 30
             guidance_scale = self._resolve_guidance_scale(sp, 1.0)
             default_flow_shift = 5.0
@@ -2427,6 +2416,26 @@ class Cosmos3OmniDiffusersPipeline(
         if val is not None:
             return val
         return default
+
+    def _resolve_action_frame_params(self, sp: OmniDiffusionSamplingParams, num_frames: int) -> tuple[int, int]:
+        action_chunk_param = self._get_sp_param(sp, "action_chunk_size", None)
+        if action_chunk_param is not None:
+            action_chunk_size = int(action_chunk_param)
+            if sp.num_frames is None:
+                num_frames = action_chunk_size + 1
+        elif sp.num_frames is None:
+            action_chunk_size = 16
+            num_frames = action_chunk_size + 1
+        else:
+            action_chunk_size = int(num_frames) - 1
+        if action_chunk_size <= 0:
+            raise ValueError(f"Cosmos3 action_chunk_size must be positive, got {action_chunk_size}.")
+        if num_frames not in (action_chunk_size, action_chunk_size + 1):
+            raise ValueError(
+                "Cosmos3 action requests require num_frames to equal action_chunk_size "
+                f"or action_chunk_size + 1; got num_frames={num_frames}, action_chunk_size={action_chunk_size}."
+            )
+        return num_frames, action_chunk_size
 
     def _get_robolab_transform(self, *, format_prompt_as_json: bool = False):
         transforms = getattr(self, "_robolab_transforms", None)
@@ -4985,23 +4994,7 @@ class Cosmos3OmniDiffusersPipeline(
             batch_size = 1  # Existing video pipeline assumes B=1.
 
         if action_enabled:
-            action_chunk_param = self._get_sp_param(sp, "action_chunk_size", None)
-            if action_chunk_param is not None:
-                action_chunk_size = int(action_chunk_param)
-                if sp.num_frames is None:
-                    num_frames = action_chunk_size + 1
-            elif sp.num_frames is None:
-                action_chunk_size = 16
-                num_frames = action_chunk_size + 1
-            else:
-                action_chunk_size = int(num_frames) - 1
-            if action_chunk_size <= 0:
-                raise ValueError(f"Cosmos3 action_chunk_size must be positive, got {action_chunk_size}.")
-            if num_frames not in (action_chunk_size, action_chunk_size + 1):
-                raise ValueError(
-                    "Cosmos3 action requests require num_frames to equal action_chunk_size "
-                    f"or action_chunk_size + 1; got num_frames={num_frames}, action_chunk_size={action_chunk_size}."
-                )
+            num_frames, action_chunk_size = self._resolve_action_frame_params(sp, num_frames)
             num_inference_steps = sp.num_inference_steps or 30
             guidance_scale = self._resolve_guidance_scale(sp, 1.0)
             default_flow_shift = 5.0

@@ -4299,6 +4299,20 @@ def test_post_decode_success_releases_session_with_manager_enabled(make_cosmos3_
 # ---------------------------------------------------------------------------
 
 
+def test_step_execution_rejects_action_num_frames_mismatch(make_cosmos3_pipeline) -> None:
+    pipeline = make_cosmos3_pipeline()
+    sp = make_sampling_params(
+        num_frames=10,
+        extra_args={"action_mode": "policy", "action_chunk_size": 4},
+    )
+    state = _make_step_state("step-action-invalid-1", sp, {"prompt": "act", "modalities": ["video"]})
+
+    with pytest.raises(ValueError, match="action requests require num_frames"):
+        pipeline.prepare_encode(state)
+
+    assert state.latents is None
+
+
 def test_step_execution_accepts_extra_args_action_video_parity_with_forward(
     make_cosmos3_pipeline,
 ) -> None:
@@ -4499,7 +4513,7 @@ def test_step_execution_resets_step_metadata_on_terminal_paths(make_cosmos3_pipe
 
     diffuse() clears these in its finally block; the step path's terminal
     equivalent is _release_step_resources(), reached via post_decode() and
-    release_step_state() on every terminal path.
+    release_step_request() on every terminal path.
     """
     pipeline = make_cosmos3_pipeline()
     _capture_tokenize_calls(pipeline)
@@ -4527,7 +4541,7 @@ def test_step_execution_resets_step_metadata_on_terminal_paths(make_cosmos3_pipe
     pipeline.prepare_encode(state)
     _run_one_denoise_step(pipeline, state)
     assert pipeline.current_step_index is not None
-    pipeline.release_step_state(state)
+    pipeline.release_step_request(state)
     _assert_reset()
 
     # Failure: per-request exception during the step loop, then retirement.
@@ -4544,5 +4558,5 @@ def test_step_execution_resets_step_metadata_on_terminal_paths(make_cosmos3_pipe
     with pytest.raises(RuntimeError, match="step exploded"):
         pipeline.step_scheduler(state, noise_pred)
     pipeline.step_scheduler = original_step_scheduler
-    pipeline.release_step_state(state)
+    pipeline.release_step_request(state)
     _assert_reset()

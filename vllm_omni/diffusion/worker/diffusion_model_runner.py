@@ -1463,28 +1463,51 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                 paged_kv_runtime=paged_kv_runtime,
                 in_diffusion_kv_memory_profile=in_diffusion_kv_memory_profile,
             ):
-                clear_pipeline_stage_durations(pipeline)
-                noise_pred = pipeline.denoise_step(input_batch, states=states)
-                denoise_stage_durations = consume_pipeline_stage_durations(pipeline)
-                for state in states:
-                    merge_stage_durations(
-                        state,
-                        denoise_stage_durations,
-                    )
+                denoise_exception: Exception | None = None
+                try:
+                    clear_pipeline_stage_durations(pipeline)
+                    noise_pred = pipeline.denoise_step(input_batch, states=states)
+                except Exception as exc:
+                    denoise_exception = exc
+                    noise_pred = None
+                    logger.error("Stepwise denoise failed: %s", exc, exc_info=True)
 
-                pipeline_interrupted = getattr(pipeline, "interrupt", False)
-                if noise_pred is None and pipeline_interrupted:
+                denoise_failed = _dit_any_rank_failed(denoise_exception is not None)
+                pipeline_interrupted = False
+                if denoise_failed:
+                    if denoise_exception is None:
+                        denoise_exception = RuntimeError("Stepwise denoise failed on another DiT rank")
+                        logger.error("%s", denoise_exception)
                     for state in states:
                         runner_output_list.append(
                             RunnerOutput(
                                 request_id=state.request_id,
                                 step_index=state.step_index,
                                 finished=True,
-                                result=DiffusionOutput(error="stepwise denoise interrupted"),
+                                result=DiffusionOutput.from_exception(denoise_exception),
                             )
                         )
-
                 else:
+                    denoise_stage_durations = consume_pipeline_stage_durations(pipeline)
+                    for state in states:
+                        merge_stage_durations(
+                            state,
+                            denoise_stage_durations,
+                        )
+
+                    pipeline_interrupted = getattr(pipeline, "interrupt", False)
+                    if noise_pred is None and pipeline_interrupted:
+                        for state in states:
+                            runner_output_list.append(
+                                RunnerOutput(
+                                    request_id=state.request_id,
+                                    step_index=state.step_index,
+                                    finished=True,
+                                    result=DiffusionOutput(error="stepwise denoise interrupted"),
+                                )
+                            )
+
+                if not denoise_failed and not (noise_pred is None and pipeline_interrupted):
                     offset = 0
                     for req in states:
                         if req.latents is None:
@@ -1587,7 +1610,7 @@ class DiffusionModelRunner(DiffusionStagePayloadMixin):
                 terminal_request_ids = [
                     runner_output.request_id for runner_output in runner_output_list if runner_output.finished
                 ]
-                self._update_states_after(states, input_batch, pipeline_interrupted)
+                self._update_states_after(states, input_batch, pipeline_interrupted or denoise_failed)
                 if (
                     getattr(self.od_config, "diffusion_kv_mode", DiffusionKVCacheMode.DENSE_LEGACY)
                     is DiffusionKVCacheMode.PAGED_SCHEDULER
