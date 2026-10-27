@@ -1240,8 +1240,7 @@ class Cosmos3OmniDiffusersPipeline(
         self._cache_dit_requires_paired_cfg = False
 
         # Step-wise execution keeps per-request state on the runner-owned
-        # StepRequestState (state.extra); the pipeline holds no per-request
-        # caches so cancelled / failed requests cannot leak GPU tensors here.
+        # StepRequestState (state.extra); the pipeline holds no per-request caches.
         self._validate_step_execution_config(od_config)
 
         self.setup_diffusion_pipeline_profiler(
@@ -1401,10 +1400,8 @@ class Cosmos3OmniDiffusersPipeline(
         Falls back to ``sampling_params.extra_args["action_video"]`` when no
         preprocessed video is supplied, normalizes the shape to
         ``[1, 3, T, H, W]``, and derives height/width defaults from the tensor
-        when ``sp.height`` / ``sp.width`` are unset.
-
-        Returns ``(tensor, height, width)``; height/width are None when not
-        derivable (i.e. ``sp`` already set them or no tensor is present).
+        when ``sp.height`` / ``sp.width`` are unset. Returns ``(tensor,
+        height, width)``; height/width are None when not derivable.
         """
         if action_video_tensor is None:
             extra_action_video = self._get_sp_param(sp, "action_video", None)
@@ -1448,17 +1445,16 @@ class Cosmos3OmniDiffusersPipeline(
         sp = state.sampling
         extra_args = getattr(sp, "extra_args", {}) or {}
 
-        # Determine mode (shared normalization/validation with forward()'s
-        # _is_t2i_request: rejects None-typed, unknown, and image+video
-        # modalities instead of silently guessing a generation mode).
+        # Determine mode via the same normalization/validation as forward()'s
+        # _is_t2i_request (rejects None-typed, unknown, and image+video
+        # modalities instead of silently guessing a mode).
         is_t2i = "image" in self._normalize_prompt_modalities(first_prompt)
         sound_enabled = self._is_sound_request(first_prompt, sp)
         action_mode = self._get_action_mode(first_prompt, sp)
         action_enabled = action_mode is not None
 
-        # Share forward()'s extra_args["action_video"] fallback (and its
-        # height/width defaults) so requests that condition through
-        # sampling_params.extra_args work identically in step mode.
+        # Share forward()'s extra_args["action_video"] fallback so requests
+        # conditioning through sampling_params work identically in step mode.
         action_video_height = None
         action_video_width = None
         if action_enabled:
@@ -1577,8 +1573,8 @@ class Cosmos3OmniDiffusersPipeline(
             raise ValueError("Cosmos3 transfer inference is not supported in step execution mode yet.")
 
         # Reuse forward()'s request validation so step mode cannot silently
-        # bypass mode restrictions (distilled/Edge limits, action/sound combo
-        # checks, transformer module checks, image+video exclusivity).
+        # bypass mode restrictions (distilled/Edge limits, action/sound
+        # combos, image+video exclusivity).
         self._validate_distilled_generation_mode(
             is_t2i=p.is_t2i,
             image_tensor=p.image_tensor,
@@ -1619,16 +1615,14 @@ class Cosmos3OmniDiffusersPipeline(
             raise ValueError("Cosmos3 video-to-video generation is supported only for video outputs.")
 
         # RoboLab/OpenPI observations route to an action-only envelope code path
-        # in forward() that is not wired into step execution yet — reject instead
-        # of silently degrading to plain video generation.
+        # in forward() not wired into step execution — reject, don't degrade.
         step_extra_args = p.sp.extra_args if isinstance(getattr(p.sp, "extra_args", None), dict) else {}
         if step_extra_args.get("robot_obs") is not None or step_extra_args.get("observation") is not None:
             raise NotImplementedError(
                 "Cosmos3 RoboLab/OpenPI observation requests are not supported in step execution mode yet."
             )
 
-        # forward() realizes T2I num_outputs_per_prompt > 1 by looping the whole
-        # diffusion; the step path is single-sample per request for now.
+        # forward() loops the whole diffusion for T2I num_outputs_per_prompt > 1; the step path is single-sample.
         num_outputs = max(1, int(self._get_sp_param(p.sp, "num_outputs_per_prompt", 1) or 1))
         if num_outputs > 1:
             raise NotImplementedError(
@@ -1772,12 +1766,11 @@ class Cosmos3OmniDiffusersPipeline(
         state.extra["session_id"] = session_id
         self._kv_reset_und(kv_state)
 
-        # Populate state fields consumed by InputBatch / step_scheduler
+        # Populate state fields consumed by InputBatch / step_scheduler; CFG is
+        # handled internally via predict_noise_maybe_with_cfg, not InputBatch's do_true_cfg.
         state.latents = latents
         state.timesteps = timesteps
         state.step_index = 0
-        # Cosmos3 handles CFG internally via predict_noise_maybe_with_cfg,
-        # not via InputBatch's do_true_cfg mechanism.
         state.do_true_cfg = False
         state.prompt_embeds = torch.zeros(1, 1, device=latents.device, dtype=latents.dtype)
 
@@ -1816,13 +1809,12 @@ class Cosmos3OmniDiffusersPipeline(
         states: Sequence[StepRequestState] | None = None,
         **kwargs: Any,
     ) -> torch.Tensor | None:
-        """Run one denoise forward for all requests in the batch.
+        """Run one denoise forward for the batch.
 
-        Single-request path only; multi-request batching is a future optimization.
-        Fail loudly rather than silently returning wrong predictions for the
-        trailing requests (the runner slices ``noise_pred`` per request along
-        the batch dimension). Per-request state lives on the runner-owned
-        ``StepRequestState.extra`` — the pipeline keeps no per-request cache,
+        Single-request only: fail loudly rather than silently returning wrong
+        predictions for trailing requests (the runner slices ``noise_pred``
+        per request). Per-request state lives on the runner-owned
+        ``StepRequestState.extra`` — the pipeline holds no per-request cache,
         so cancelled / failed requests cannot leak GPU tensors here.
         """
         if len(input_batch.request_ids) > 1:
@@ -1847,8 +1839,6 @@ class Cosmos3OmniDiffusersPipeline(
         latents = extra["_current_latents"]
         timesteps = extra["timesteps"] if extra.get("timesteps") is not None else self.scheduler.timesteps
 
-        # Per-request scheduler (deepcopy'd in prepare_encode): FlowUniPC keeps
-        # multistep history / step index as mutable instance state.
         req_scheduler = extra.get("req_scheduler") or self.scheduler
 
         noise_pred, cond_cache, uncond_cache = self._predict_noise_one_step(
@@ -1875,7 +1865,7 @@ class Cosmos3OmniDiffusersPipeline(
 
         # The runner slices ``noise_pred`` per request along the batch dimension,
         # which cannot carry per-modality tuples. Flatten multimodal (video/
-        # action/sound) predictions into a single packed tensor and record the
+        # action/sound) predictions into one packed tensor and record the
         # per-modality shapes so ``step_scheduler`` can unpack it.
         if isinstance(noise_pred, tuple):
             batch = noise_pred[0].shape[0]
@@ -1914,8 +1904,6 @@ class Cosmos3OmniDiffusersPipeline(
         raw_action_dim = extra["raw_action_dim"]
         generator = p.generator
 
-        # Per-request scheduler (deepcopy'd in prepare_encode): FlowUniPC keeps
-        # multistep history / step index as mutable instance state.
         req_scheduler = extra.get("req_scheduler") or self.scheduler
 
         timesteps = extra["timesteps"] if extra.get("timesteps") is not None else req_scheduler.timesteps
@@ -1926,8 +1914,6 @@ class Cosmos3OmniDiffusersPipeline(
         has_sound = sound_latents is not None
         pred_shapes = extra.get("_pred_shapes")
         if (has_action or has_sound) and pred_shapes is not None:
-            # denoise_step returned a flattened packed tensor (the runner slices
-            # noise_pred along the batch dimension, so tuples cannot pass through).
             if not isinstance(noise_pred, torch.Tensor):
                 raise ValueError("Cosmos3 multimodal step path expected a packed tensor prediction.")
             batch = noise_pred.shape[0]
@@ -2072,9 +2058,8 @@ class Cosmos3OmniDiffusersPipeline(
         else:
             result = {"video": video}
 
-        # Release per-request GPU resources on the success path. Failure and
-        # abort paths are covered by release_step_request(), which the runner
-        # invokes on every terminal path.
+        # Success-path release; failure/abort paths go through
+        # release_step_request(), which the runner invokes on every terminal path.
         self._release_step_resources(state.extra)
 
         return DiffusionOutput(output=result)
@@ -2102,9 +2087,7 @@ class Cosmos3OmniDiffusersPipeline(
         # dropping the session alone leaves them pinned on device until the
         # next request's _kv_reset_und.
         self.transformer.reset_cache()
-        # Per-step metadata / mixed-precision set inside _predict_noise_one_step;
-        # diffuse() clears these in its finally block, so the step path clears
-        # them on every terminal path here.
+        # Per-step metadata / mixed-precision from _predict_noise_one_step; cleared on every terminal path.
         self._clear_denoise_step_metadata()
         self._reset_mixed_precision()
         extra.clear()
@@ -2824,9 +2807,8 @@ class Cosmos3OmniDiffusersPipeline(
     def _validate_step_execution_config(od_config: Any) -> None:
         """Reject engine configs the step path cannot honor, at pipeline init.
 
-        The step engine may otherwise schedule a second request while the
-        first is mid-denoise; ``denoise_step`` only supports one active
-        request, so fail at startup instead of mid-execution.
+        ``denoise_step`` supports one active request; fail at startup rather
+        than mid-execution when ``max_num_seqs`` would schedule a second one.
         """
         if getattr(od_config, "step_execution", False) and int(getattr(od_config, "max_num_seqs", 1)) > 1:
             raise ValueError(
@@ -2838,10 +2820,8 @@ class Cosmos3OmniDiffusersPipeline(
     def _normalize_prompt_modalities(prompt_data: Any) -> list[str]:
         """Normalize and validate prompt-level ``modalities``.
 
-        Shared by ``forward()`` (via ``_is_t2i_request``) and the step path
-        (``_parse_request_from_state``) so both entry points apply identical
-        normalization (``None`` -> [], bare string -> single-element list) and
-        reject the same invalid requests instead of silently guessing a mode.
+        Shared by ``forward()`` and the step path so both entry points
+        normalize identically and reject the same invalid requests.
         """
         modalities = prompt_data.get("modalities", []) if isinstance(prompt_data, dict) else []
         if modalities is None:
@@ -3742,14 +3722,11 @@ class Cosmos3OmniDiffusersPipeline(
 
     @staticmethod
     def _cfg_active_at(t: torch.Tensor | float, guidance_interval: tuple[float, float] | None) -> bool:
-        """Whether CFG is active at timestep ``t``.
+        """Whether CFG is active at raw scheduler timestep ``t``.
 
-        ``guidance_interval`` restricts CFG to timesteps inside the closed
-        interval ``[lo, hi]``, compared against the raw scheduler timestep
-        value (works for both the [0, 1000] discrete scale and normalized
-        flow-matching scales). Outside the interval the cond/uncond delta is
-        zeroed so all ranks continue to execute identical control flow
-        (CFG-Parallel safe).
+        ``guidance_interval`` restricts CFG to the closed interval
+        ``[lo, hi]`` on the raw timestep value (works for both the discrete
+        [0, 1000] scale and normalized flow-matching scales).
         """
         if guidance_interval is None:
             return True
@@ -3780,12 +3757,10 @@ class Cosmos3OmniDiffusersPipeline(
     ) -> tuple[torch.Tensor | tuple[torch.Tensor, ...] | None, tuple, tuple]:
         """One CFG-aware noise prediction shared by ``diffuse()`` and step execution.
 
-        Dispatches over the three CFG modes: CFG-Parallel (one branch per rank),
-        sequential two-branch CFG with per-branch UND K/V caching, and single
-        branch no-CFG. Returns ``(noise_pred, cond_cache, uncond_cache)``; the
-        bespoke caches are passed in and returned so each caller keeps its own
-        persistence (loop-local for ``diffuse``, ``StepRequestState.extra`` for
-        step execution).
+        Dispatches over CFG-Parallel (one branch per rank), sequential
+        two-branch CFG, and no-CFG. Returns ``(noise_pred, cond_cache,
+        uncond_cache)``; the bespoke caches round-trip so each caller keeps
+        its own persistence.
         """
         self._set_denoise_step_metadata(step_index, timesteps, scheduler)
         self._set_mixed_precision_step(step_index, len(timesteps))
@@ -3799,9 +3774,7 @@ class Cosmos3OmniDiffusersPipeline(
             # Each CFG-parallel rank runs exactly one branch (rank 0 -> cond,
             # else uncond), so session keying loads/stores only this rank's branch.
             cfg_rank_is_negative = get_classifier_free_guidance_rank() != 0
-            # Outside the interval, scale=1 makes the combined output equal
-            # the cond branch. Every rank remains on the same iteration and
-            # collective schedule.
+            # Outside the interval, scale=1 keeps the output equal to the cond branch (collective-safe).
             step_scale = guidance_scale if self._cfg_active_at(t, guidance_interval) else 1.0
             self._kv_load_und(kv_state, is_negative=cfg_rank_is_negative)
             noise_pred = self.predict_noise_maybe_with_cfg(
@@ -3860,8 +3833,7 @@ class Cosmos3OmniDiffusersPipeline(
                 if not self._kv_load_und(kv_state, is_negative=True):
                     self.transformer.cached_kv, self.transformer.cached_freqs_gen = uncond_cache
                 if pp_active and uncond_cache[0] is None and not is_pipeline_last_stage():
-                    # Re-arm the cache transfer so the uncond branch's UND K/V
-                    # is forwarded to the downstream PP stages again.
+                    # Re-arm the cache transfer so the uncond K/V is forwarded downstream again.
                     self.transformer.reset_pp_step()
                 noise_uncond = self._predict_noise_via_pp_driver(
                     _cache_context="uncond",
@@ -3877,22 +3849,19 @@ class Cosmos3OmniDiffusersPipeline(
                     self._kv_capture_und(kv_state, is_negative=True)
                 elif uncond_cache[0] is None:
                     uncond_cache = (self.transformer.cached_kv, self.transformer.cached_freqs_gen)
-                # Outside the interval, scale=1.0 makes the combined result
-                # equal to noise_cond; the uncond pass is computed only to
-                # preserve cache-dit's cond/uncond parity.
+                # Outside the interval, scale=1.0 keeps the result equal to
+                # noise_cond; the uncond pass only preserves cache-dit parity.
                 step_scale = guidance_scale if cfg_active else 1.0
                 if not pp_active or is_pipeline_last_stage():
                     noise_pred = self.combine_cfg_noise(noise_cond, noise_uncond, step_scale, cfg_normalize=False)
                 else:
-                    # Non-last PP ranks have no local prediction; the scheduler
-                    # handshake receives the packed result from the last stage.
+                    # Non-last PP ranks predict nothing; the handshake receives the packed result from the last stage.
                     noise_pred = None
             else:
                 noise_pred = noise_cond
             return noise_pred, cond_cache, uncond_cache
 
-        # No CFG: a single cond branch per step. Bespoke (state None) keeps
-        # using the transformer-instance cache exactly as before.
+        # No CFG: a single cond branch; bespoke (state None) keeps the transformer-instance cache as before.
         self._kv_load_und(kv_state, is_negative=False)
         noise_pred = self._predict_noise_via_pp_driver(
             _cache_context="cond",
@@ -4153,9 +4122,8 @@ class Cosmos3OmniDiffusersPipeline(
                 sound_latents = step_out[idx]
 
         try:
-            # Bespoke per-branch K/V caches for the sequential-CFG path (unused
-            # by the cfg-parallel and no-CFG modes). Loop-local here; step
-            # execution persists them in StepRequestState.extra instead.
+            # Bespoke per-branch K/V caches for the sequential-CFG path; loop-local
+            # here, persisted in StepRequestState.extra by step execution.
             cond_cache: tuple = (None, None)
             uncond_cache: tuple = (None, None)
             for step_index, t in enumerate(self.progress_bar(timesteps)):
@@ -5033,8 +5001,6 @@ class Cosmos3OmniDiffusersPipeline(
         )
         use_system_prompt = bool(self._get_sp_param(sp, "use_system_prompt", is_v2v))
 
-        # Shared action-video resolution (extra_args fallback + shape
-        # normalization + height/width defaults), reused by step execution.
         action_video_tensor, action_video_height, action_video_width = self._resolve_action_video_input(
             sp, action_video_tensor if action_enabled else None
         )
